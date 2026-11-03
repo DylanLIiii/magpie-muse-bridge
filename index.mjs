@@ -5,8 +5,10 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { MuseSdkRuntime } from "./sdk-runtime.mjs"
 
 const PROVIDER_ID = "muse-bridge"
+const TRANSPORT = process.env.MUSE_BRIDGE_TRANSPORT || "sdk"
 const MCP_SERVER_NAME = "magpie"
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`
 const MCP_SERVER_PATH = fileURLToPath(new URL("./mcp-server.mjs", import.meta.url))
@@ -231,6 +233,9 @@ class Conv {
     this.dirs = makeDirs(path.join(ensureBridgeRoot(), randomUUID()))
     this.token = randomUUID()
     this.sessionId = null
+    this.runtime = null
+    this.runtimeClosing = Promise.resolve()
+    this.toolsSignature = null
     this.model = null
     this.workDir = null
     this.expected = null
@@ -247,6 +252,11 @@ class Conv {
   reset() {
     this.sessionId = null
     this.expected = null
+    if (this.runtime) {
+      const runtime = this.runtime
+      this.runtime = null
+      this.runtimeClosing = runtime.close().then(() => syncAuth(this.dirs.config))
+    }
   }
 
   recordAssistant(turn, content) {
@@ -259,8 +269,8 @@ class Conv {
 
   startTurn(opts) {
     if (this.turn) throw new BusyError("muse bridge: this conversation still has an unfinished response")
-    if (!this.sessionId) this.sessionId = randomUUID()
-    const turn = new Turn(this, opts)
+    if (TRANSPORT === "exec" && !this.sessionId) this.sessionId = randomUUID()
+    const turn = TRANSPORT === "sdk" ? new SdkTurn(this, opts) : new Turn(this, opts)
     this.turn = turn
     this.expected = opts.messages.map((message) => ({ ...message }))
     this.lastUsed = Date.now()
@@ -277,9 +287,10 @@ class Conv {
     if (this.disposed) return
     this.disposed = true
     this.turn?.finalize()
+    this.reset()
     sessions.delete(this.token)
     if (pool.get(this.convKey) === this) pool.delete(this.convKey)
-    fs.promises.rm(this.dirs.base, { recursive: true, force: true }).catch(() => {})
+    this.runtimeClosing.then(() => fs.promises.rm(this.dirs.base, { recursive: true, force: true })).catch(() => {})
   }
 }
 
@@ -448,6 +459,10 @@ class Turn {
     this.timer.unref?.()
   }
 
+  touch() {
+    this.#arm()
+  }
+
   kill() {
     const child = this.child
     if (!child || this.exited) return
@@ -576,6 +591,69 @@ class Turn {
       this.kill()
     }
     this.conv.lastUsed = Date.now()
+  }
+}
+
+class SdkTurn extends Turn {
+  start() {
+    liveTurns.add(this)
+    this.touch()
+    this.startSdk().catch((error) => this.sdkFailed(error))
+  }
+
+  async startSdk() {
+    await this.conv.runtimeClosing
+    if (this.finalized || this.done) return
+    this.runtime = this.conv.runtime ??= new MuseSdkRuntime({
+      command: this.musePath,
+      model: this.model,
+      cwd: this.conv.dirs.work,
+      env: { ...museEnv(this.conv.dirs), MUSE_CONTRIBUTOR_MODE: "0" },
+      baseURL: process.env.MUSE_BRIDGE_BASE_URL,
+      onStderr: (chunk) => { this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL) },
+      onWarning: (message) => console.warn(`muse bridge: ${message}`),
+    })
+    const mcpServers = this.tools.length ? {
+      [MCP_SERVER_NAME]: {
+        transport: "stdio", command: process.execPath, args: [MCP_SERVER_PATH],
+        env: { MUSE_BRIDGE_CONTROL_PORT: String(controlServer.address().port), MUSE_BRIDGE_TOKEN: this.conv.token },
+        mode: "required",
+      },
+    } : {}
+    await this.runtime.start({
+      model: this.model, effort: this.effort,
+      prompt: this.prompt, images: this.images, mcpServers,
+      onSession: (sessionId) => { this.sessionId = sessionId; this.conv.sessionId = sessionId },
+      onActivity: () => this.touch(),
+      onText: (text) => { this.sawText = true; this.push({ type: "text", text }) },
+      onComplete: (usage) => {
+        if (this.finalized || this.done) return
+        this.done = true
+        this.exited = true
+        this.usage = usage
+        clearTimeout(this.timer)
+        liveTurns.delete(this)
+        this.push({ type: "result", text: "", usage })
+      },
+      onError: (error) => this.sdkFailed(error),
+    })
+  }
+
+  sdkFailed(error) {
+    if (this.finalized || this.done) return
+    const tail = this.stderrTail.trim()
+    if (tail && !error.message.includes(tail)) error.message += `\n${tail}`
+    this.fail(error)
+    this.kill()
+    if (!this.attached) this.finalize()
+  }
+
+  kill() {
+    clearTimeout(this.timer)
+    liveTurns.delete(this)
+    this.exited = true
+    if (this.runtime && this.conv.runtime === this.runtime) this.conv.reset()
+    else this.runtime?.close()
   }
 }
 
@@ -781,7 +859,7 @@ function blockText(block, sink) {
       throw new UnsupportedContent("an image that is not base64 PNG/JPEG/GIF/WebP")
     }
     if (!sink) return "[image attached earlier in the conversation]"
-    sink.push({ data: block.source.data, ext })
+    sink.push({ data: block.source.data, ext, mediaType: String(block.source.media_type).toLowerCase() })
     return `[image ${sink.length} attached]`
   }
   if (block.type === "document") throw new UnsupportedContent("a document block")
@@ -1043,18 +1121,21 @@ function sseEvent(event, data) {
 function translateUsage(usage) {
   let input = 0
   let cached = 0
+  let written = 0
   let output = 0
   let reasoning = 0
   for (const row of usage?.models ?? []) {
     input += Number(row.input_tokens) || 0
     cached += Number(row.cached_tokens) || 0
+    written += Number(row.cache_write_tokens) || 0
     output += Number(row.output_tokens) || 0
     reasoning += Number(row.reasoning_tokens) || 0
   }
   return {
-    input_tokens: Math.max(0, input - cached),
+    input_tokens: Math.max(0, input - cached - written),
     output_tokens: output,
     cache_read_input_tokens: cached,
+    ...(written > 0 ? { cache_creation_input_tokens: written } : {}),
     ...(reasoning > 0 ? { output_tokens_details: { thinking_tokens: reasoning } } : {}),
   }
 }
@@ -1227,6 +1308,7 @@ const QUOTA_FAILURE = /quota|rate limit|usage limit|allowance|too many requests/
 
 function errorResponse(error) {
   const message = String(error?.message ?? error)
+  if (error?.statusCode === 401) return jsonError(401, message, { "X-Magpie-Sign-In": "expired" })
   if (error?.statusCode) return jsonError(error.statusCode, message)
   if (AUTH_FAILURE.test(message)) return jsonError(401, message, { "X-Magpie-Sign-In": "expired" })
   if (QUOTA_FAILURE.test(message)) return jsonError(429, message)
@@ -1268,6 +1350,7 @@ async function respond(conv, turn, body, signal) {
 }
 
 async function handleRequest(init) {
+  if (!["sdk", "exec"].includes(TRANSPORT)) return jsonError(503, "MUSE_BRIDGE_TRANSPORT must be sdk or exec")
   const musePath = findMuse()
   if (!musePath) return jsonError(503, "muse CLI not found on this machine; install Muse Code: https://dev.meta.ai")
   let body
@@ -1341,10 +1424,12 @@ async function handleRequest(init) {
       }
       const history = body.messages.slice(0, -1)
       const resume = conv.sessionId && conv.model === model && conv.workDir === callerWorkDir &&
+        (TRANSPORT !== "sdk" || conv.toolsSignature === JSON.stringify(tools)) &&
         !resultBlocks.length && history.length > 0 && conv.matchesHistory(history)
       if (!resume) conv.reset()
       conv.model = model
       conv.workDir = callerWorkDir
+      conv.toolsSignature = JSON.stringify(tools)
       const images = []
       const prompt = resume ? renderContinuedTurn(body, images) : renderInitialPrompt(body, callerWorkDir, tools, images)
       const turn = conv.startTurn({ musePath, prompt, images, tools, model, effort, messages: body.messages })
@@ -1450,6 +1535,7 @@ function jsonError(status, message, headers = {}) {
 }
 
 process.once("exit", () => {
+  for (const conv of pool.values()) conv.runtime?.close()
   for (const turn of liveTurns) {
     try { turn.child?.kill("SIGKILL") } catch {}
   }
