@@ -1,0 +1,30 @@
+{
+  "name": "@magpie-community/magpie-muse-bridge",
+  "version": "0.1.0",
+  "description": "Muse Code subscription provider that drives the real muse CLI (muse exec --json) and bridges the client's tools through MCP, avoiding HTTP impersonation",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "mcp-server.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check index.mjs && node --check mcp-server.mjs && node --check test-harness.mjs && node --check test-real-muse.mjs && node --check test-failures.mjs && node --check test-edges.mjs && node --check test-magpie-backend.mjs",
+    "test": "node test-real-muse.mjs && node test-failures.mjs && node test-edges.mjs"
+  },
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "muse",
+    "muse-code",
+    "meta"
+  ],
+  "license": "MIT",
+  "magpie": {
+    "maxConcurrency": 4
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
