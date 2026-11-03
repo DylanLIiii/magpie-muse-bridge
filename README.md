@@ -119,9 +119,14 @@ also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
   request creates a new session and replays caller history before any new turn
   is submitted. A session owned by another host is never replayed automatically.
   Schema fingerprint/version mismatches warn; missing capabilities fail.
-  Edits, compaction, aborted turns, model/workspace changes, and changed tool
-  definitions create a fresh session with caller history rendered once. Ambiguous
-  turn admission is not automatically retried.
+   Edits, compaction, aborted turns, workspace changes, and changed tool
+   definitions create a fresh session with caller history rendered once. A model
+   change uses MSP `session/setModel` on the existing session; reasoning effort
+   remains a per-turn request option. Ambiguous
+   turn admission is not automatically retried.
+   Tool definitions are compared canonically, so JSON key ordering alone does
+   not rebuild a session; an actual MCP name, description or schema change still
+   does because MSP 1.4.14 has no supported session MCP hot-reload method.
 - **Real tool round trips.** When the model calls a tool, muse's MCP
   `tools/call` stays pending, and the HTTP response ends with
   `stop_reason: tool_use`. The next request's `tool_result` answers that exact
@@ -157,8 +162,14 @@ also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
 
 - **No system-prompt replacement.** The public MSP contract has no system-prompt
   override. Caller `system` instructions are embedded in the initial user input;
-  they are not system-role equivalent. Muse's own instructions remain and may load
-  personal rules/skills. The bridge doesn't claim full raw-model API equivalence.
+   they are not system-role equivalent. Muse's own instructions remain and may load
+   personal rules/skills. The bridge doesn't claim full raw-model API equivalence.
+   The SDK also exposes no supported flag or session method to remove Muse's core
+   native prompt. The bridge already uses `--preset empty`, an empty reminder
+   roster, `--disable-request-user-input`, contributor mode off, and an untrusted
+   isolated workspace to avoid optional tools, observers, workspace skills and
+   extra client-side context. Removing the remaining native prompt would require
+   unsupported Muse internals or a different runtime.
 - **Reasoning text isn't shown.** SDK mode currently forwards agent-message text;
   it does not expose internal reasoning or reminder output as assistant text.
 - **Images:** base64 PNG, JPEG, GIF, and WebP in the current user message go to

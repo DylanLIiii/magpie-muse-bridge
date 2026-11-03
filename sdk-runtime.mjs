@@ -214,6 +214,23 @@ export class MuseSdkRuntime {
     return this.deadline(this.host.connection.command(method, params, { maxAttempts: 1, ...options }), method)
   }
 
+  async configureSession({ model }) {
+    if (!this.sessionId || !this.host) return
+    const current = this.options.model
+    if (model && model !== current) {
+      const catalog = await this.deadline(this.host.connection.request("model/list", {}), "model/list")
+      const selected = catalog.models?.find((row) => row.modelId === model && row.providerId === "meta")
+      if (!selected) throw runtimeError(`Meta model ${model} is not in this host's model catalog`)
+      const result = await this.command("session/setModel", {
+        sessionId: this.sessionId,
+        commandId: this.host.connection.mintCommandId(),
+        model: { providerId: selected.providerId, modelId: selected.modelId },
+      })
+      if (result.status !== "accepted") throw runtimeError(`session/setModel was not accepted (${result.status})`)
+      this.options.model = model
+    }
+  }
+
   async createSession(host, model) {
     const catalog = await this.deadline(host.connection.request("model/list", {}), "model/list")
     const selected = catalog.models?.find((row) => row.modelId === model && row.providerId === "meta")
@@ -227,6 +244,7 @@ export class MuseSdkRuntime {
     })
     this.sessionId = result.session?.sessionId
     if (!this.sessionId) throw runtimeError("session/start returned no sessionId")
+    this.options.model = model
   }
 
   async start({ model, effort, prompt, images, replayInput, onSession, onText, onComplete, onError, onActivity }) {
@@ -259,6 +277,7 @@ export class MuseSdkRuntime {
         }
       }
       this.loadedHost = host
+      await this.configureSession({ model })
       onSession(this.sessionId)
       if (this.active !== active || this.closed) return
       const input = [{ type: "text", text: prompt }, ...images.map((image) => ({

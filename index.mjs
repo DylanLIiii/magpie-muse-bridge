@@ -309,7 +309,7 @@ class Turn {
     this.body = opts.body
     this.images = opts.images
     this.tools = opts.tools
-    this.toolsSignature = JSON.stringify(opts.tools)
+    this.toolsSignature = stableJSON(opts.tools)
     this.model = opts.model
     this.effort = opts.effort
     this.dir = path.join(conv.dirs.base, "turns", randomUUID())
@@ -816,12 +816,14 @@ function matchToolResults(body, model, blocks) {
   return found || direct
 }
 
-function conversationKey(body, model) {
+function conversationKey(body, _model) {
   const system = historyKey([{ role: "system", content: body.system || "" }])
   const first = body.messages?.[0]
   const firstText = first ? historyKey([first]) : ""
   const discriminator = body.metadata?.user_id || ""
-  const source = model + "\n" + discriminator + "\n" + system + "\n===\n" + firstText
+  // Model selection is mutable session state in MSP; do not fork the bridge
+  // conversation merely because the caller picked another Muse model.
+  const source = (TRANSPORT === "sdk" ? "" : _model + "\n") + discriminator + "\n" + system + "\n===\n" + firstText
   return createHash("sha256").update(source).digest("hex")
 }
 
@@ -1412,7 +1414,7 @@ async function handleRequest(init) {
         })), body)
         turn.validateResults(results)
         if (!conv.matchesHistory(trailingMessages(body).history) || conv.model !== model ||
-          turn.toolsSignature !== JSON.stringify(tools) || conv.workDir !== callerWorkDir) {
+          turn.toolsSignature !== stableJSON(tools) || conv.workDir !== callerWorkDir) {
           // A changed context or configuration can't go on in this muse run.
           // Replay the real results into a new session instead.
           turn.finalize()
@@ -1441,13 +1443,14 @@ async function handleRequest(init) {
         pool.set(convKey, conv)
       }
       const history = body.messages.slice(0, -1)
-      const resume = conv.sessionId && conv.model === model && conv.workDir === callerWorkDir &&
-        (TRANSPORT !== "sdk" || conv.toolsSignature === JSON.stringify(tools)) &&
-        !resultBlocks.length && history.length > 0 && conv.matchesHistory(history)
+      const sameWorkDir = conv.workDir === callerWorkDir
+      const sameTools = TRANSPORT !== "sdk" || conv.toolsSignature === stableJSON(tools)
+      const sameHistory = history.length > 0 && conv.matchesHistory(history)
+      const resume = conv.sessionId && (TRANSPORT === "sdk" || conv.model === model) && sameWorkDir && sameTools && !resultBlocks.length && sameHistory
       if (!resume) conv.reset()
       conv.model = model
       conv.workDir = callerWorkDir
-      conv.toolsSignature = JSON.stringify(tools)
+      conv.toolsSignature = stableJSON(tools)
       const images = []
       const prompt = resume ? renderContinuedTurn(body, images) : renderInitialPrompt(body, callerWorkDir, tools, images)
       const turn = conv.startTurn({ musePath, prompt, images, tools, model, effort, body, messages: body.messages })

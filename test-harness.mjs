@@ -312,6 +312,7 @@ export async function startHarness({ bin, env = {} } = {}) {
   process.env.MUSE_NO_AUTO_UPDATE = "1"
   process.env.META_API_KEY = "dummy-test-key"
   process.env.MUSE_BRIDGE_BASE_URL = `http://127.0.0.1:${port}/v1`
+  process.env.MUSE_SDK_TEST_LOG = path.join(tmp, "msp-control.jsonl")
   // The bridge hands its environment to muse, so TMPDIR keeps muse's scratch
   // dirs (muse-shell-sandbox-*) and the bridge root inside tmp. As a backstop,
   // finish() also removes any new empty sandbox dirs under the system temp
@@ -343,6 +344,10 @@ export async function startHarness({ bin, env = {} } = {}) {
   }
 
   const results = []
+  const readLogs = () => {
+    try { return fs.readFileSync(process.env.MUSE_SDK_TEST_LOG, "utf8").split("\n").filter(Boolean).map(JSON.parse) }
+    catch { return [] }
+  }
   async function step(name, fn) {
     const started = Date.now()
     try {
@@ -367,5 +372,5 @@ export async function startHarness({ bin, env = {} } = {}) {
     setTimeout(() => process.exit(failed ? 1 : 0), 800)
   }
 
-  return { tmp, port, requests, plugin, _test, request, call, step, results, finish }
+  return { tmp, port, requests, readLogs, plugin, _test, request, call, step, results, finish }
 }
