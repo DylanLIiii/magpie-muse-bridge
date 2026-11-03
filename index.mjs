@@ -5,8 +5,11 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { MuseSdkRuntime } from "./sdk-runtime.mjs"
+import { createMuseAuth, isMuseLoginPending } from "./muse-auth.mjs"
 
 const PROVIDER_ID = "muse-bridge"
+const TRANSPORT = process.env.MUSE_BRIDGE_TRANSPORT || "sdk"
 const MCP_SERVER_NAME = "magpie"
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`
 const MCP_SERVER_PATH = fileURLToPath(new URL("./mcp-server.mjs", import.meta.url))
@@ -36,6 +39,9 @@ const MODELS = [
 
 const pool = new Map()
 const liveTurns = new Set()
+// Include hosts already closing after reset/eviction: they no longer have a
+// conv.runtime pointer but still need synchronous cleanup if the plugin exits.
+const sdkRuntimes = new Set()
 const sessions = new Map()
 const toolCalls = new Map()
 let cachedMusePath
@@ -231,6 +237,9 @@ class Conv {
     this.dirs = makeDirs(path.join(ensureBridgeRoot(), randomUUID()))
     this.token = randomUUID()
     this.sessionId = null
+    this.runtime = null
+    this.runtimeClosing = Promise.resolve()
+    this.toolsSignature = null
     this.model = null
     this.workDir = null
     this.expected = null
@@ -247,6 +256,12 @@ class Conv {
   reset() {
     this.sessionId = null
     this.expected = null
+    if (this.runtime) {
+      const runtime = this.runtime
+      this.runtime = null
+      this.runtimeClosing = runtime.close().then(() => syncAuth(this.dirs.config))
+        .finally(() => sdkRuntimes.delete(runtime))
+    }
   }
 
   recordAssistant(turn, content) {
@@ -259,8 +274,8 @@ class Conv {
 
   startTurn(opts) {
     if (this.turn) throw new BusyError("muse bridge: this conversation still has an unfinished response")
-    if (!this.sessionId) this.sessionId = randomUUID()
-    const turn = new Turn(this, opts)
+    if (TRANSPORT === "exec" && !this.sessionId) this.sessionId = randomUUID()
+    const turn = TRANSPORT === "sdk" ? new SdkTurn(this, opts) : new Turn(this, opts)
     this.turn = turn
     this.expected = opts.messages.map((message) => ({ ...message }))
     this.lastUsed = Date.now()
@@ -277,9 +292,10 @@ class Conv {
     if (this.disposed) return
     this.disposed = true
     this.turn?.finalize()
+    this.reset()
     sessions.delete(this.token)
     if (pool.get(this.convKey) === this) pool.delete(this.convKey)
-    fs.promises.rm(this.dirs.base, { recursive: true, force: true }).catch(() => {})
+    this.runtimeClosing.then(() => fs.promises.rm(this.dirs.base, { recursive: true, force: true })).catch(() => {})
   }
 }
 
@@ -289,6 +305,7 @@ class Turn {
     this.sessionId = conv.sessionId
     this.musePath = opts.musePath
     this.prompt = opts.prompt
+    this.body = opts.body
     this.images = opts.images
     this.tools = opts.tools
     this.toolsSignature = JSON.stringify(opts.tools)
@@ -448,6 +465,10 @@ class Turn {
     this.timer.unref?.()
   }
 
+  touch() {
+    this.#arm()
+  }
+
   kill() {
     const child = this.child
     if (!child || this.exited) return
@@ -576,6 +597,78 @@ class Turn {
       this.kill()
     }
     this.conv.lastUsed = Date.now()
+  }
+}
+
+class SdkTurn extends Turn {
+  start() {
+    liveTurns.add(this)
+    this.touch()
+    this.startSdk().catch((error) => this.sdkFailed(error))
+  }
+
+  async startSdk() {
+    await this.conv.runtimeClosing
+    if (this.finalized || this.done) return
+    const conv = this.conv
+    // MSP's session MCP schema omits tool_timeout_sec. This conversation owns
+    // its entire host, so use native host settings to retain long client waits.
+    // Do not also inject the same server in session/start: that is a name conflict.
+    if (!this.conv.runtime) writeSettings(this.conv, this.tools.length > 0)
+    this.runtime = this.conv.runtime ??= new MuseSdkRuntime({
+      command: this.musePath,
+      model: this.model,
+      cwd: this.conv.dirs.work,
+      env: { ...museEnv(this.conv.dirs), MUSE_CONTRIBUTOR_MODE: "0" },
+      baseURL: process.env.MUSE_BRIDGE_BASE_URL,
+      onStderr: (chunk) => {
+        const current = conv.turn
+        if (current) current.stderrTail = (current.stderrTail + chunk).slice(-STDERR_TAIL)
+      },
+      onExit: () => syncAuth(conv.dirs.config),
+      onWarning: (message) => console.warn(`muse bridge: ${message}`),
+    })
+    sdkRuntimes.add(this.runtime)
+    await this.runtime.start({
+      model: this.model, effort: this.effort,
+      prompt: this.prompt, images: this.images,
+      replayInput: () => {
+        const images = []
+        return { prompt: renderInitialPrompt(this.body, this.conv.workDir, this.tools, images), images }
+      },
+      onSession: (sessionId) => { this.sessionId = sessionId; this.conv.sessionId = sessionId },
+      onActivity: () => this.touch(),
+      onText: (text) => { this.sawText = true; this.push({ type: "text", text }) },
+      onComplete: (usage) => {
+        if (this.finalized || this.done) return
+        syncAuth(this.conv.dirs.config)
+        this.done = true
+        this.exited = true
+        this.usage = usage
+        clearTimeout(this.timer)
+        liveTurns.delete(this)
+        this.push({ type: "result", text: "", usage })
+      },
+      onError: (error) => this.sdkFailed(error),
+    })
+  }
+
+  sdkFailed(error) {
+    if (this.finalized || this.done) return
+    syncAuth(this.conv.dirs.config)
+    const tail = this.stderrTail.trim()
+    if (tail && !error.message.includes(tail)) error.message += `\n${tail}`
+    this.fail(error)
+    this.kill()
+    if (!this.attached) this.finalize()
+  }
+
+  kill() {
+    clearTimeout(this.timer)
+    liveTurns.delete(this)
+    this.exited = true
+    if (this.runtime && this.conv.runtime === this.runtime) this.conv.reset()
+    else this.runtime?.close()
   }
 }
 
@@ -760,6 +853,7 @@ function normalizeTools(body) {
 }
 
 const IMAGE_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/gif": "gif", "image/webp": "webp" }
+const IMAGE_MEDIA = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" }
 
 // blockText renders a user block as prompt text. Images in the current turn
 // go to sink (and on to `muse exec --image`); older ones become a marker.
@@ -781,7 +875,7 @@ function blockText(block, sink) {
       throw new UnsupportedContent("an image that is not base64 PNG/JPEG/GIF/WebP")
     }
     if (!sink) return "[image attached earlier in the conversation]"
-    sink.push({ data: block.source.data, ext })
+    sink.push({ data: block.source.data, ext, mediaType: IMAGE_MEDIA[ext] })
     return `[image ${sink.length} attached]`
   }
   if (block.type === "document") throw new UnsupportedContent("a document block")
@@ -1043,18 +1137,21 @@ function sseEvent(event, data) {
 function translateUsage(usage) {
   let input = 0
   let cached = 0
+  let written = 0
   let output = 0
   let reasoning = 0
   for (const row of usage?.models ?? []) {
     input += Number(row.input_tokens) || 0
     cached += Number(row.cached_tokens) || 0
+    written += Number(row.cache_write_tokens) || 0
     output += Number(row.output_tokens) || 0
     reasoning += Number(row.reasoning_tokens) || 0
   }
   return {
-    input_tokens: Math.max(0, input - cached),
+    input_tokens: Math.max(0, input - cached - written),
     output_tokens: output,
     cache_read_input_tokens: cached,
+    ...(written > 0 ? { cache_creation_input_tokens: written } : {}),
     ...(reasoning > 0 ? { output_tokens_details: { thinking_tokens: reasoning } } : {}),
   }
 }
@@ -1227,6 +1324,7 @@ const QUOTA_FAILURE = /quota|rate limit|usage limit|allowance|too many requests/
 
 function errorResponse(error) {
   const message = String(error?.message ?? error)
+  if (error?.statusCode === 401) return jsonError(401, message, { "X-Magpie-Sign-In": "expired" })
   if (error?.statusCode) return jsonError(error.statusCode, message)
   if (AUTH_FAILURE.test(message)) return jsonError(401, message, { "X-Magpie-Sign-In": "expired" })
   if (QUOTA_FAILURE.test(message)) return jsonError(429, message)
@@ -1268,6 +1366,8 @@ async function respond(conv, turn, body, signal) {
 }
 
 async function handleRequest(init) {
+  if (isMuseLoginPending()) return jsonError(503, "Muse sign-in is in progress. Finish or cancel it before sending model requests.")
+  if (!["sdk", "exec"].includes(TRANSPORT)) return jsonError(503, "MUSE_BRIDGE_TRANSPORT must be sdk or exec")
   const musePath = findMuse()
   if (!musePath) return jsonError(503, "muse CLI not found on this machine; install Muse Code: https://dev.meta.ai")
   let body
@@ -1341,13 +1441,15 @@ async function handleRequest(init) {
       }
       const history = body.messages.slice(0, -1)
       const resume = conv.sessionId && conv.model === model && conv.workDir === callerWorkDir &&
+        (TRANSPORT !== "sdk" || conv.toolsSignature === JSON.stringify(tools)) &&
         !resultBlocks.length && history.length > 0 && conv.matchesHistory(history)
       if (!resume) conv.reset()
       conv.model = model
       conv.workDir = callerWorkDir
+      conv.toolsSignature = JSON.stringify(tools)
       const images = []
       const prompt = resume ? renderContinuedTurn(body, images) : renderInitialPrompt(body, callerWorkDir, tools, images)
-      const turn = conv.startTurn({ musePath, prompt, images, tools, model, effort, messages: body.messages })
+      const turn = conv.startTurn({ musePath, prompt, images, tools, model, effort, body, messages: body.messages })
       return await respond(conv, turn, body, init.signal)
     })
   } catch (error) {
@@ -1355,11 +1457,13 @@ async function handleRequest(init) {
   }
 }
 
-async function checkSignIn(musePath) {
+async function checkSignIn(musePath, { browserOnly = false } = {}) {
   const dirs = makeDirs(path.join(ensureBridgeRoot(), "probe-" + randomUUID()))
   try {
     fs.writeFileSync(path.join(dirs.config, "muse", "settings.json"), JSON.stringify({ schema_version: 1 }), { mode: 0o600 })
-    const probe = await execOnce(musePath, ["usage"], { cwd: dirs.work, env: museEnv(dirs), timeoutMs: 30_000 })
+    const env = museEnv(dirs)
+    if (browserOnly) delete env.META_API_KEY
+    const probe = await execOnce(musePath, ["usage"], { cwd: dirs.work, env, timeoutMs: 30_000 })
     syncAuth(dirs.config)
     return probe
   } finally {
@@ -1391,37 +1495,28 @@ function modelEntry(model) {
 }
 
 export const MuseBridgePlugin = async () => {
+  const auth = createMuseAuth({
+    findMuse, checkSignIn,
+    beforeLogin: async () => {
+      if (liveTurns.size) throw new Error("Finish or cancel active Muse requests before changing the Muse account.")
+      const previous = [...pool.values()]
+      for (const conv of previous) conv.dispose()
+      await Promise.all(previous.map((conv) => conv.runtimeClosing))
+    },
+    createLoginContext: () => {
+      // Isolate model/provider settings from Magpie's own endpoint rewrite, but
+      // let the official CLI load and save the user's sign-in through auth.json.
+      const dirs = makeDirs(path.join(ensureBridgeRoot(), "login-" + randomUUID()))
+      fs.writeFileSync(path.join(dirs.config, "muse/settings.json"), JSON.stringify({ schema_version: 1 }), { mode: 0o600 })
+      return { cwd: dirs.work, env: museEnv(dirs), cleanup: async () => {
+        syncAuth(dirs.config)
+        await fs.promises.rm(dirs.base, { recursive: true, force: true })
+      } }
+    },
+  })
   return {
     auth: {
-      provider: PROVIDER_ID,
-      single: true,
-      methods: [
-        {
-          type: "api",
-          keyless: true,
-          label: "Use the muse CLI's sign-in",
-          authorize: async () => {
-            const muse = findMuse()
-            if (!muse) {
-              return {
-                type: "failed",
-                error: "muse CLI not found. Install Muse Code (curl -fsSL https://dev.meta.ai/install.sh | bash), then run `muse login`.",
-              }
-            }
-            const probe = await checkSignIn(muse)
-            if (probe.err || probe.code !== 0) {
-              const why = probe.timedOut
-                ? "timed out after 30s"
-                : (probe.stderr || probe.stdout || "").trim().split("\n").slice(-3).join(" ") || probe.err?.message || "unknown error"
-              return {
-                type: "failed",
-                error: `muse at ${muse} is not signed in (${why}). Run \`muse login\` in a terminal, then try again.`,
-              }
-            }
-            return { type: "success", key: "muse" }
-          },
-        },
-      ],
+      ...auth,
       loader: async () => ({
         baseURL: "muse://local",
         apiKey: "muse",
@@ -1450,6 +1545,10 @@ function jsonError(status, message, headers = {}) {
 }
 
 process.once("exit", () => {
+  for (const conv of pool.values()) {
+    syncAuth(conv.dirs.config)
+  }
+  for (const runtime of sdkRuntimes) runtime.killNow()
   for (const turn of liveTurns) {
     try { turn.child?.kill("SIGKILL") } catch {}
   }

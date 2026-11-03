@@ -308,6 +308,7 @@ export async function startHarness({ bin, env = {} } = {}) {
   // own sign-in is never touched.
   process.env.XDG_CONFIG_HOME = path.join(tmp, "user-config")
   process.env.MUSE_PATH = bin
+  process.env.MUSE_BRIDGE_TRANSPORT = "exec"
   process.env.MUSE_NO_AUTO_UPDATE = "1"
   process.env.META_API_KEY = "dummy-test-key"
   process.env.MUSE_BRIDGE_BASE_URL = `http://127.0.0.1:${port}/v1`
