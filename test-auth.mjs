@@ -55,9 +55,53 @@ try {
     assert.equal(s.before, 0)
     assert.ok(fs.readFileSync(s.log, "utf8").split("\n").filter(Boolean).every(l => JSON.parse(l).args[0] === "usage"))
   })
+  await test("the primary UI method explicitly offers existing and browser login", async () => {
+    const s = setup()
+    fs.writeFileSync(s.state, "signed in")
+    const method = s.auth.methods[0]
+    const prompt = method.prompts[0]
+    assert.equal(prompt.type, "select")
+    assert.deepEqual(prompt.options.map(o => o.value), ["existing", "browser"])
+    const flow = await method.authorize({ [prompt.key]: "existing" })
+    assert.equal(flow.url, ""); assert.equal(flow.method, "auto")
+    assert.deepEqual(await flow.callback(), { type: "success", key: "muse" })
+    assert.deepEqual(await flow.callback(), { type: "success", key: "muse" })
+    assert.equal(s.before, 0); assert.equal(s.cleanups, 0)
+    const calls = fs.readFileSync(s.log, "utf8").trim().split("\n").map(JSON.parse)
+    assert.deepEqual(calls.map(row => row.args), [["usage"]])
+  })
+  await test("choosing existing login while signed out never starts browser login", async () => {
+    const s = setup()
+    const flow = await s.auth.methods[0].authorize({ loginSource: "existing" })
+    const r = await flow.callback()
+    assert.equal(r.type, "failed"); assert.match(r.error, /not signed in/)
+    assert.equal(s.before, 0); assert.equal(s.cleanups, 0)
+    assert.deepEqual(fs.readFileSync(s.log, "utf8").trim().split("\n").map(JSON.parse).map(r => r.args), [["usage"]])
+  })
+  await test("existing-login UI callbacks respect cancellation and replacement", async () => {
+    let entered, release
+    const inProbe = new Promise(resolve => { entered = resolve })
+    const gate = new Promise(resolve => { release = resolve })
+    const s = setup("success", {}, { probe: async () => { entered(); await gate } })
+    fs.writeFileSync(s.state, "signed in")
+    const method = s.auth.methods[0]
+    const initial = new AbortController()
+    const flow = await method.authorize({ loginSource: "existing" }, { signal: initial.signal })
+    initial.abort() // authorize's context ends when the UI receives the flow
+    const completion = new AbortController()
+    const result = flow.callback(undefined, { signal: completion.signal })
+    await inProbe
+    const newer = await method.authorize({ loginSource: "existing" })
+    release()
+    assert.match((await result).error, /replaced/)
+    const aborted = new AbortController(); aborted.abort()
+    assert.match((await newer.callback(undefined, { signal: aborted.signal })).error, /cancelled/)
+    const third = await method.authorize({ loginSource: "existing" })
+    assert.equal((await third.callback()).type, "success")
+  })
   await test("CLI URL and device code reach Magpie; only a non-secret marker is saved", async () => {
     const s = setup()
-    const flow = await s.auth.methods[0].authorize()
+    const flow = await s.auth.methods[0].authorize({ loginSource: "browser" })
     assert.equal(flow.method, "auto"); assert.equal(flow.url, "https://auth.meta.com/device")
     assert.match(flow.instructions, /code ABCD-EFGH/)
     assert.deepEqual(await flow.callback(), { type: "success", key: "muse" })

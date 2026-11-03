@@ -48,14 +48,18 @@ magpie plugin login muse-bridge
 ```
 
 The Magpie account picker offers **Sign in with Muse** and **Use existing Muse
-sign-in**. The first starts the official `muse login` process and shows its
+sign-in**. **Sign in with Muse** also asks how to sign in, so UI paths that open
+that method directly still offer **Use existing Muse sign-in** and **Sign in
+with Muse in browser**. Reusing the login checks `muse usage` without opening a
+browser or asking for a key. Choosing the browser option starts the official
+`muse login` process and shows its
 HTTPS approval link and copyable device code. Magpie waits for the same CLI to
 finish and verifies the account with `muse usage`; it stores only a non-secret
 `muse` connection marker. The second method only verifies an existing CLI login.
 In a terminal you can select them explicitly:
 
 ```sh
-magpie plugin login muse-bridge 1  # browser/device approval via official CLI
+magpie plugin login muse-bridge 1  # choose existing login or browser/device approval
 magpie plugin login muse-bridge 2  # reuse existing Muse sign-in
 ```
 

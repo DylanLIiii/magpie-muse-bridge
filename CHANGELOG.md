@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Offer existing Muse login inside the main UI sign-in flow as well as the
+  keyless method, including UI paths that open the first auth method directly.
+
 ## 0.2.0
 
 - Add Magpie browser/device sign-in through the official `muse login` CLI, plus

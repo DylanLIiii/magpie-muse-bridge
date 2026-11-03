@@ -1,6 +1,6 @@
 {
   "name": "@magpie-community/magpie-muse-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Magpie provider using the official Muse Code SDK with client tools bridged through MCP",
   "type": "module",
   "main": "./index.mjs",

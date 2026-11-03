@@ -34,28 +34,35 @@ const env = { ...process.env,
 delete env.META_API_KEY; delete env.MUSE_AUTH_PATH
 if (process.env.MAGPIE_TEST_BUN) env.MAGPIE_BUN = process.env.MAGPIE_TEST_BUN
 const magpie = process.env.MAGPIE_TEST_BIN || "magpie"
-async function run(args) {
-  try { return await exec(magpie, args, { cwd: repo, env, timeout: 60000, maxBuffer: 1024 * 1024 }) }
+async function run(args, input = "") {
+  try {
+    const command = exec(magpie, args, { cwd: repo, env, timeout: 60000, maxBuffer: 1024 * 1024 })
+    command.child.stdin.end(input)
+    return await command
+  }
   catch (error) { throw new Error(`Magpie ${args.slice(0, 3).join(" ")} failed: ${error.stderr || error.message}`) }
 }
 try {
   await run(["plugin", "add", repo])
-  const signedIn = await run(["plugin", "login", "muse-bridge", "1"])
+  const signedIn = await run(["plugin", "login", "muse-bridge", "1"], "2\n")
   assert.match(signedIn.stdout + signedIn.stderr, /ABCD-EFGH/)
   const authPath = path.join(dirs.config, "magpie/plugin-auth.json")
   const saved = fs.readFileSync(authPath, "utf8")
   assert.ok(saved.includes('"muse"'), "Magpie must save the bridge connection marker")
   assert.ok(!saved.includes("access_token"), "Magpie must not store Muse CLI credentials")
   await run(["plugin", "login", "muse-bridge", "2"])
+  const reused = await run(["plugin", "login", "muse-bridge", "1"], "1\n")
+  assert.match(reused.stdout + reused.stderr, /How would you like to sign in to Muse/)
+  assert.match(reused.stdout + reused.stderr, /Use existing Muse sign-in/)
   const calls = fs.readFileSync(env.MUSE_TEST_AUTH_LOG, "utf8").trim().split("\n").map(JSON.parse)
   assert.equal(calls.filter(r => r.args[0] === "login").length, 1, "existing sign-in must not restart browser auth")
   await run(["plugin", "logout", "muse-bridge"])
   assert.equal(fs.existsSync(env.MUSE_TEST_AUTH_STATE), true, "Magpie disconnect must preserve official CLI login")
   env.MUSE_TEST_AUTH_MODE = "early-failure"
-  await assert.rejects(() => run(["plugin", "login", "muse-bridge", "1"]), (error) => {
+  await assert.rejects(() => run(["plugin", "login", "muse-bridge", "1"], "2\n"), (error) => {
     assert.match(error.message, /declined, expired, or failed/)
     assert.doesNotMatch(error.message, /callback is not a function/)
     return true
   })
-  console.log("ok   installed Magpie browser flow, marker save, keyless reuse, disconnect, and early auth failure with fake Muse")
+  console.log("ok   installed Magpie login-source choice, browser flow, marker save, existing reuse, disconnect, and early auth failure with fake Muse")
 } finally { fs.rmSync(root, { recursive: true, force: true }) }
