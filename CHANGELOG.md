@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.1
+
+- Offer existing Muse login inside the main UI sign-in flow as well as the
+  keyless method, including UI paths that open the first auth method directly.
+- Keep SDK conversations when the requested Muse model changes by using MSP
+  `session/setModel`; only history, workspace or MCP tool-definition changes
+  require a new session and replay.
+- Canonically compare MCP tool definitions so equivalent JSON key ordering does
+  not trigger an unnecessary session rebuild.
+- Report Muse subscription allowance through Magpie's usage hook, including
+  current/weekly percentages, reset times, tier and snapshot time. Read only
+  `muse usage --json`; explain missing server data without inventing a quota.
+
 ## 0.2.0
 
 - Add Magpie browser/device sign-in through the official `muse login` CLI, plus

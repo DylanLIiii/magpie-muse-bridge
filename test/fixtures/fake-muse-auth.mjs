@@ -13,6 +13,12 @@ if (process.env.MUSE_TEST_AUTH_LOG) {
 }
 if (args[0] === "usage") {
   if (process.env.META_API_KEY || (state && fs.existsSync(state))) {
+    if (args.includes("--json")) {
+      console.log(process.env.MUSE_TEST_USAGE_FILE
+        ? fs.readFileSync(process.env.MUSE_TEST_USAGE_FILE, "utf8")
+        : JSON.stringify({ schemaVersion: 1, allowance: null, reason: "server_sent_no_usage" }))
+      process.exit(0)
+    }
     console.log("Muse account is signed in; subscription fixture allowance available")
     process.exit(0)
   }

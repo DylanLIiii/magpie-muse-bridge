@@ -48,14 +48,18 @@ magpie plugin login muse-bridge
 ```
 
 The Magpie account picker offers **Sign in with Muse** and **Use existing Muse
-sign-in**. The first starts the official `muse login` process and shows its
+sign-in**. **Sign in with Muse** also asks how to sign in, so UI paths that open
+that method directly still offer **Use existing Muse sign-in** and **Sign in
+with Muse in browser**. Reusing the login checks `muse usage` without opening a
+browser or asking for a key. Choosing the browser option starts the official
+`muse login` process and shows its
 HTTPS approval link and copyable device code. Magpie waits for the same CLI to
 finish and verifies the account with `muse usage`; it stores only a non-secret
 `muse` connection marker. The second method only verifies an existing CLI login.
 In a terminal you can select them explicitly:
 
 ```sh
-magpie plugin login muse-bridge 1  # browser/device approval via official CLI
+magpie plugin login muse-bridge 1  # choose existing login or browser/device approval
 magpie plugin login muse-bridge 2  # reuse existing Muse sign-in
 ```
 
@@ -89,6 +93,23 @@ an unavailable model is rejected instead of silently switching providers.
 To explicitly keep the original CLI transport, set `MUSE_BRIDGE_TRANSPORT=exec`
 in the environment of the Magpie plugin host and restart that host.
 
+## Subscription allowance
+
+The account's allowance appears in **Providers** and **Usage**, and through
+`magpie quota muse-bridge --json` or the gateway's `/v1/magpie/quotas` endpoint.
+The plugin reads the official `muse usage --json` command without a model turn,
+using the same isolated settings and shared CLI login as its sign-in check.
+When Muse reports them, Magpie shows the tier, current-window and weekly **used
+percentages**, reset times and the reading's **As of** timestamp. Muse does not
+report absolute token limits here. A missing duration is not assumed to be
+five hours, and unavailable usage is never treated as zero or unlimited.
+
+If Muse returns `server_sent_no_usage`, the account instead says **Muse has not
+returned usage data for this subscription yet**. This can happen before use in
+a new window. The plugin preserves the login and does not make a model request
+to generate usage. API-key connections and accounts without a reported allowance
+also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
+
 ## How it works
 
 - **One host per conversation.** The SDK initializes MSP, verifies the
@@ -98,9 +119,14 @@ in the environment of the Magpie plugin host and restart that host.
   request creates a new session and replays caller history before any new turn
   is submitted. A session owned by another host is never replayed automatically.
   Schema fingerprint/version mismatches warn; missing capabilities fail.
-  Edits, compaction, aborted turns, model/workspace changes, and changed tool
-  definitions create a fresh session with caller history rendered once. Ambiguous
-  turn admission is not automatically retried.
+   Edits, compaction, aborted turns, workspace changes, and changed tool
+   definitions create a fresh session with caller history rendered once. A model
+   change uses MSP `session/setModel` on the existing session; reasoning effort
+   remains a per-turn request option. Ambiguous
+   turn admission is not automatically retried.
+   Tool definitions are compared canonically, so JSON key ordering alone does
+   not rebuild a session; an actual MCP name, description or schema change still
+   does because MSP 1.4.14 has no supported session MCP hot-reload method.
 - **Real tool round trips.** When the model calls a tool, muse's MCP
   `tools/call` stays pending, and the HTTP response ends with
   `stop_reason: tool_use`. The next request's `tool_result` answers that exact
@@ -136,8 +162,14 @@ in the environment of the Magpie plugin host and restart that host.
 
 - **No system-prompt replacement.** The public MSP contract has no system-prompt
   override. Caller `system` instructions are embedded in the initial user input;
-  they are not system-role equivalent. Muse's own instructions remain and may load
-  personal rules/skills. The bridge doesn't claim full raw-model API equivalence.
+   they are not system-role equivalent. Muse's own instructions remain and may load
+   personal rules/skills. The bridge doesn't claim full raw-model API equivalence.
+   The SDK also exposes no supported flag or session method to remove Muse's core
+   native prompt. The bridge already uses `--preset empty`, an empty reminder
+   roster, `--disable-request-user-input`, contributor mode off, and an untrusted
+   isolated workspace to avoid optional tools, observers, workspace skills and
+   extra client-side context. Removing the remaining native prompt would require
+   unsupported Muse internals or a different runtime.
 - **Reasoning text isn't shown.** SDK mode currently forwards agent-message text;
   it does not expose internal reasoning or reminder output as assistant text.
 - **Images:** base64 PNG, JPEG, GIF, and WebP in the current user message go to

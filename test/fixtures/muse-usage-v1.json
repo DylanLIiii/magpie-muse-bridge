@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "allowance": {
+    "asOfMs": 1793037245064,
+    "source": "mint",
+    "tier": "Muse Code Power Usage",
+    "weekly": {
+      "resetsAtMs": 1793577600000,
+      "usedPercent": 5
+    },
+    "window": {
+      "resetsAtMs": 1793053104000,
+      "usedPercent": 15
+    }
+  }
+}

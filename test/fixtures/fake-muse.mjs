@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Deterministic NDJSON MSP host; no provider, network, or auth access.
 // MUSE_SDK_TEST_LOG=/tmp/muse.jsonl ./test/fixtures/fake-muse.mjs serve --preset empty
-// MUSE_SDK_TEST_DENY_CAP=1 withholds sessionMcp. Only CLI words and methods are logged.
+// MUSE_SDK_TEST_DENY_CAP=1 withholds sessionMcp. Logs contain only allowlisted control fields.
 import { spawn } from 'node:child_process'
 import { appendFileSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import path from 'node:path'
@@ -142,13 +142,23 @@ async function run(s, turn, prompt) {
 async function dispatch(frame) {
   const { id, method, params: p = {} } = frame
   if (typeof method !== 'string') return
-  log({ type: 'rpc', method })
+  const safeParams = {}
+  for (const key of ['sessionId', 'commandId', 'modelId', 'providerId', 'reasoningEffort']) {
+    if (typeof p[key] === 'string') safeParams[key] = p[key]
+  }
+  if (p.model && typeof p.model === 'object') {
+    safeParams.model = Object.fromEntries(['providerId', 'modelId'].filter(key => typeof p.model[key] === 'string').map(key => [key, p.model[key]]))
+  }
+  log({ type: 'rpc', method, params: safeParams })
   if (method === 'initialized') return
   if (method === 'initialize') {
     reply(id, { experimentalApi: false, grantedCapabilities: denyCap ? [] : ['sessionMcp'], museHome: process.cwd(), platformFamily: 'unix', platformOs: process.platform === 'darwin' ? 'macos' : 'linux', schema: { version: 1, fingerprint: EXPECTED_SCHEMA_FINGERPRINT }, serverInfo: { name: 'fake-muse', version: '1.4.14' }, sessionDurability: 'ephemeral', userAgent: 'fake-muse/1.4.14' }); return
   }
   if (method === 'model/list') {
-    reply(id, { providerId: 'meta', profileId: 'meta', source: 'fakeCatalog', models: [{ modelId: 'muse-spark-1.3', displayLabel: 'Muse Spark 1.3', providerId: 'meta', profileId: 'meta', isDefault: true, isActive: !!p.sessionId, contextLimit: 128000, outputLimit: 32000, cost: null, description: 'Deterministic SDK fixture', releaseDate: null, variants: ['low', 'medium', 'high'], defaultReasoningEffort: 'medium' }] }); return
+    reply(id, { providerId: 'meta', profileId: 'meta', source: 'fakeCatalog', models: [
+      { modelId: 'muse-spark-1.3', displayLabel: 'Muse Spark 1.3', providerId: 'meta', profileId: 'meta', isDefault: true, isActive: !!p.sessionId, contextLimit: 128000, outputLimit: 32000, cost: null, description: 'Deterministic SDK fixture', releaseDate: null, variants: ['low', 'medium', 'high'], defaultReasoningEffort: 'medium' },
+      { modelId: 'muse-spark-1.2', displayLabel: 'Muse Spark 1.2', providerId: 'meta', profileId: 'meta', isDefault: false, isActive: false, contextLimit: 128000, outputLimit: 32000, cost: null, description: 'Deterministic SDK fixture', releaseDate: null, variants: ['low', 'medium', 'high'], defaultReasoningEffort: 'medium' },
+    ] }); return
   }
   if (method === 'session/start') {
     if (denyCap && p.config?.mcpServers) { refuse(id, -32010, 'sessionMcp capability required', { kind: 'capabilityRequired', capability: 'sessionMcp' }); return }
@@ -175,6 +185,10 @@ async function dispatch(frame) {
     s.session.providerId = p.model.providerId || 'meta'
     reply(id, { commandId: p.commandId, status: 'accepted' })
     event(s, 'session/modelChanged', { modelId: s.session.modelId, providerId: s.session.providerId, source: 'user' }); return
+  }
+  if (method === 'session/setReasoningEffort') {
+    s.session.reasoningEffort = p.reasoningEffort
+    reply(id, { commandId: p.commandId, status: 'accepted' }); return
   }
   if (method === 'turn/cancel' || method === 'turn/interrupt') {
     const turn = s.active

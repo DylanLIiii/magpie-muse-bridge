@@ -50,7 +50,32 @@ export function createMuseAuth({ findMuse, checkSignIn, createLoginContext, befo
       : "Muse could not verify its sign-in. Check muse usage in a terminal; your CLI credentials were not changed.")
   }
 
-  async function authorize(_inputs, context = {}) {
+  async function authorize(inputs, context = {}) {
+    if (inputs?.loginSource !== "existing") return authorizeBrowser(inputs, context)
+    const own = ++generation
+    if (pending) await pending.stop("Muse sign-in was replaced by a newer attempt.")
+    if (context.signal?.aborted) return rejectAuthorize("Muse sign-in was cancelled.")
+    if (own !== generation) return rejectAuthorize("Muse sign-in was replaced by a newer attempt.")
+    let result
+    return {
+      url: "",
+      instructions: "Checking the Muse Code login already saved on this machine.",
+      method: "auto",
+      callback(_code, next = {}) {
+        result ??= (async () => {
+          if (next.signal?.aborted) return failed("Muse sign-in was cancelled.")
+          if (own !== generation) return failed("Muse sign-in was replaced by a newer attempt.")
+          const checked = await useExisting()
+          if (next.signal?.aborted) return failed("Muse sign-in was cancelled.")
+          if (own !== generation) return failed("Muse sign-in was replaced by a newer attempt.")
+          return checked
+        })()
+        return result
+      },
+    }
+  }
+
+  async function authorizeBrowser(_inputs, context = {}) {
     const own = ++generation
     const muse = findMuse()
     if (!muse) return rejectAuthorize(missing().error)
@@ -168,7 +193,18 @@ export function createMuseAuth({ findMuse, checkSignIn, createLoginContext, befo
   return {
     provider: "muse-bridge", single: true,
     methods: [
-      { type: "oauth", label: "Sign in with Muse", authorize },
+      {
+        type: "oauth", label: "Sign in with Muse", authorize,
+        // Some account UI paths open method 0 directly. Keep the login source
+        // choice inside that method as well as the keyless CLI shortcut below.
+        prompts: [{
+          type: "select", key: "loginSource", message: "How would you like to sign in to Muse?",
+          options: [
+            { label: "Use existing Muse sign-in", value: "existing", hint: "Reuse Muse Code already signed in on this machine." },
+            { label: "Sign in with Muse in browser", value: "browser", hint: "Start a new official Muse Code device login." },
+          ],
+        }],
+      },
       { type: "api", keyless: true, label: "Use existing Muse sign-in", authorize: useExisting },
     ],
     // Magpie has no auth.logout hook. Disconnect only removes its marker;

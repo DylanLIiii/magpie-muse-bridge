@@ -15,12 +15,21 @@ const h = await startHarness({ bin: process.env.MUSE_TEST_BIN || fixture, env: {
   MUSE_BRIDGE_TOOL_TIMEOUT_MS: process.env.MUSE_TEST_SLOW === "1" ? "180000" : "3000",
   MUSE_BRIDGE_FIRST_EVENT_MS: "8000",
 } })
-const { call, request, step, _test } = h
+const { call, request, step, readLogs, _test } = h
 const user = (text) => ({ role: "user", content: text })
 const assistant = (content) => ({ role: "assistant", content })
 const getConv = (text) => [..._test.pool.values()].find((c) => c.expected?.some((m) => m.role === "user" && m.content === text))
 const successful = (r) => { assert.equal(r.status, 200, JSON.stringify(r.error)); assert.equal(r.stop, "end_turn", JSON.stringify(r)) }
 const result = (use, text) => ({ type: "tool_result", tool_use_id: use.id, content: text })
+const orderedTool = {
+  name: "ordered",
+  description: "A tool whose schema is used to test canonical comparison",
+  input_schema: {
+    type: "object",
+    properties: { alpha: { type: "string" }, beta: { type: "number" } },
+    required: ["alpha"],
+  },
+}
 
 try {
   let first, firstId, runtime
@@ -35,12 +44,28 @@ try {
     assert.equal(runtime.host.initializeResult.experimentalApi, false)
     if (real) assert.equal(h.requests.filter((r) => r.body?.input).length, 1, "plain turn must not spawn observer inference")
   })
+  let second
   await step("second turn reuses the same SDK host and native session", async () => {
-    const r = await call({ messages: [user("sdk apples"), assistant(first.content), user("sdk pears")] })
+    second = await call({ messages: [user("sdk apples"), assistant(first.content), user("sdk pears")] })
+    const r = second
     successful(r)
     assert.equal(r.content[0].text, "REPLY users=2 history=no")
     assert.equal(getConv("sdk apples").sessionId, firstId)
     assert.equal(getConv("sdk apples").runtime, runtime)
+  })
+  await step("model changes reuse the SDK session through session/setModel", async () => {
+    const conv = getConv("sdk apples"), id = conv.sessionId, host = conv.runtime
+    const r = await call({ model: "muse-spark-1.2", output_config: { effort: "high" },
+      messages: [user("sdk apples"), assistant(first.content), user("sdk pears"), assistant(second.content), user("sdk model switch")] })
+    successful(r)
+    assert.equal(conv.sessionId, id); assert.equal(conv.runtime, host)
+    assert.equal(conv.model, "muse-spark-1.2")
+    const logs = readLogs()
+    if (!real) {
+      assert.ok(logs.some(row => row.type === "rpc" && row.method === "session/setModel" && row.params.model.modelId === "muse-spark-1.2"))
+      assert.ok(logs.some(row => row.type === "rpc" && row.method === "turn/start" && row.params.reasoningEffort === "high"))
+      assert.equal(logs.filter(row => row.type === "rpc" && row.method === "session/start" && row.params.modelId === "muse-spark-1.2").length, 0)
+    }
   })
   await step("changed caller history creates a fresh SDK session with replay", async () => {
     const r = await call({ messages: [user("sdk apples"), assistant([{ type: "text", text: "edited answer" }]), user("sdk plums")] })
@@ -96,6 +121,21 @@ try {
     successful(b); assert.notEqual(getConv("sdk schema change").sessionId, id)
     assert.match(b.content[0].text, /history=yes/)
   })
+  await step("equivalent tool schemas with reordered object keys keep the SDK session", async () => {
+    const messages = [user("sdk equivalent schema")]
+    const a = await call({ tools: [orderedTool], messages }); successful(a)
+    const conv = getConv("sdk equivalent schema"), id = conv.sessionId
+    const equivalent = {
+      ...orderedTool,
+      input_schema: {
+        required: ["alpha"],
+        properties: { beta: { type: "number" }, alpha: { type: "string" } },
+        type: "object",
+      },
+    }
+    const b = await call({ tools: [equivalent], messages: [...messages, assistant(a.content), user("continue equivalent schema")] })
+    successful(b); assert.equal(conv.sessionId, id); assert.doesNotMatch(b.content[0].text, /history=yes/)
+  })
   await step("SDK current-turn images are sent as image parts", async () => {
     const r = await call({ messages: [{ role: "user", content: [{ type: "text", text: "sdk image" }, {
       type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFgAJ/wlvq3AAAAABJRU5ErkJggg==" },
@@ -123,7 +163,10 @@ try {
       for (const r of calls) {
         for (const tool of r.body.tools || []) {
           assert.equal(tool.name, "mcp__magpie", JSON.stringify(r.body.tools))
-          assert.ok(tool.tools?.every((t) => t.name === "echo"))
+          // The equivalent-schema regression uses a second local tool later;
+          // every advertised nested tool must be one the caller supplied for
+          // that request, not a bundled Muse tool.
+          assert.ok(tool.tools?.every((t) => ["echo", "ordered"].includes(t.name)))
         }
       }
     })
