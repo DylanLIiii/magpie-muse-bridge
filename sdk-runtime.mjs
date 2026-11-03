@@ -1,20 +1,102 @@
-import { spawnMspConnection } from "@muse-code/sdk"
+import { spawn } from "node:child_process"
+import { Connection, MuseServeChild, MspError, ProtocolError, checkServedFingerprint } from "@muse-code/sdk"
 
 const SDK_VERSION = "1.4.14"
 const START_TIMEOUT_MS = 30_000
+const SHUTDOWN_TIMEOUT_MS = 3_000
+
+// MspError promotes JSON-RPC data.kind to .kind. Turn notifications instead
+// carry a TurnError directly, including quota detail on modelError failures.
+export function normalizeRuntimeError(value) {
+  const message = String(value?.message ?? value)
+  const error = new Error(message.startsWith("muse SDK: ") ? message : `muse SDK: ${message}`, { cause: value })
+  const data = value?.data
+  error.kind = value instanceof MspError ? value.kind : value?.kind ?? data?.kind
+  for (const key of ["code", "data", "retryable"]) {
+    if (value?.[key] !== undefined) error[key] = value[key]
+  }
+  error.quota = value?.quota ?? data?.quota
+  error.statusCode = value?.statusCode ?? data?.statusCode
+  if (error.statusCode == null) {
+    if (error.kind === "authRequired") error.statusCode = 401
+    else if (error.quota || error.kind === "quota" || error.kind === "quotaExceeded") error.statusCode = 429
+  }
+  return error
+}
 
 function runtimeError(message, kind) {
-  const error = new Error(`muse SDK: ${message}`)
-  if (kind === "authRequired") error.statusCode = 401
-  if (kind === "quota" || kind === "quotaExceeded") error.statusCode = 429
-  return error
+  return normalizeRuntimeError({ message, kind })
+}
+
+// The SDK handshake hides its native ChildProcess. Compose the two public SDK
+// primitives instead: its spawn hook supplies the exact owned handle, while
+// Connection still owns framing, request correlation and command admission.
+function ownedHandshake(options, ownChild) {
+  let native
+  const child = MuseServeChild.spawn({
+    museBin: options.command, args: options.args, cwd: options.cwd, env: options.env,
+    shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS, onStderr: options.onStderr,
+    spawnFn(command, args, spawnOptions) {
+      native = spawn(command, args, spawnOptions)
+      ownChild(native, spawnOptions.detached === true)
+      return native
+    },
+  })
+  const exited = new Promise((resolve, reject) => {
+    native.once("error", reject)
+    native.once("close", (code, signal) => resolve({ code, signal }))
+  })
+  exited.catch(() => {})
+  let closing
+  const transport = {
+    incoming: native.stdout,
+    write: (chunk) => new Promise((resolve, reject) => {
+      native.stdin.write(chunk, "utf8", (error) => error ? reject(error) : resolve())
+    }),
+    close(flushed) {
+      // Connection's public flush barrier must precede EOF, with a bound even
+      // when the peer stops reading. MuseServeChild owns the subsequent ladder.
+      closing ??= (async () => {
+        let timer
+        try {
+          await Promise.race([
+            flushed ?? Promise.resolve(),
+            new Promise((resolve) => { timer = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS) }),
+          ])
+        } finally {
+          clearTimeout(timer)
+          await child.close()
+        }
+      })()
+      return closing
+    },
+  }
+  const connection = new Connection(transport)
+  const close = async () => { await connection.close(); return await exited }
+  let started = false
+  return {
+    child, exited, close,
+    onNotification: (handler) => connection.onNotification(handler),
+    onProtocolError: (handler) => connection.onProtocolError(handler),
+    async initialize(params) {
+      if (started) throw new ProtocolError("initialize may be sent only once per connection")
+      started = true
+      const result = await connection.request("initialize", params)
+      if (typeof result.schema?.fingerprint !== "string") throw new ProtocolError("initialize result has no schema fingerprint")
+      const fingerprintWarning = checkServedFingerprint(result.schema.fingerprint)
+      connection.notify("initialized")
+      await connection.flush()
+      return { connection, child, exited, close, initializeResult: result, fingerprintWarning }
+    },
+  }
 }
 
 // One bounded, SDK-owned host per bridge conversation. The HTTP/tool-result
 // boundary belongs to index.mjs; the MCP call remains live inside this host.
 export class MuseSdkRuntime {
-  constructor({ command, cwd, env, model, baseURL, onStderr, onWarning }) {
-    this.options = { command, cwd, env, model, baseURL, onStderr, onWarning }
+  constructor({ command, cwd, env, model, baseURL, onStderr, onWarning, onExit }) {
+    this.options = { command, cwd, env, model, baseURL, onStderr, onWarning, onExit }
+    this.ownedChildren = new Map()
     this.host = null
     this.handshake = null
     this.sessionId = null
@@ -33,6 +115,8 @@ export class MuseSdkRuntime {
           timer = setTimeout(() => reject(runtimeError(`${label} timed out`)), START_TIMEOUT_MS)
         }),
       ])
+    } catch (error) {
+      throw normalizeRuntimeError(error)
     } finally {
       clearTimeout(timer)
     }
@@ -53,12 +137,11 @@ export class MuseSdkRuntime {
     // SDK's real-host tests use this empty roster for a single agent loop.
     args.push("-c", 'run.reminder_roster={"agents":[]}')
     if (this.options.baseURL) args.push("-c", `endpoint_transport.base_url=${JSON.stringify(this.options.baseURL)}`)
-    const handshake = spawnMspConnection({
+    const handshake = ownedHandshake({
       command: this.options.command, args,
       cwd: this.options.cwd, env: this.options.env,
-      shutdownTimeoutMs: 3_000,
       onStderr: this.options.onStderr,
-    })
+    }, (child, ownsGroup) => this.ownChild(child, ownsGroup))
     this.handshake = handshake
     // Subscribe before initialize/session/start: notification delivery can precede
     // the matching command reply. Never send model input before the handshake.
@@ -89,8 +172,39 @@ export class MuseSdkRuntime {
       this.host = host
       return host
     } catch (error) {
-      const tail = handshake.child.stderrTail.slice(-5).join("\n")
-      throw runtimeError(`${error.message}${tail ? `\n${tail}` : ""}`, error.kind)
+      throw normalizeRuntimeError(error)
+    }
+  }
+
+  ownChild(child, ownsGroup) {
+    this.ownedChildren.set(child, ownsGroup)
+    let reported = false
+    const report = (code, signal, error) => {
+      if (reported) return
+      reported = true
+      try {
+        Promise.resolve(this.options.onExit?.({ code, signal, error })).catch(() => {})
+      } catch {}
+    }
+    child.once("exit", (code, signal) => report(code, signal))
+    child.once("error", (error) => {
+      // A failed spawn has no PID. Other ChildProcess errors (for example a
+      // refused signal) do not prove exit; wait for the actual exit event.
+      if (child.pid === undefined) report(null, null, error)
+    })
+    // Keep ownership until stdio closes: an MCP helper may outlive its host
+    // and still hold the process group's pipes open after the host's exit.
+    child.once("close", () => this.ownedChildren.delete(child))
+  }
+
+  killNow() {
+    this.closed = true
+    this.active = null
+    for (const [child, ownsGroup] of this.ownedChildren) {
+      if (ownsGroup && child.pid !== undefined) {
+        try { process.kill(-child.pid, "SIGKILL"); continue } catch {}
+      }
+      try { child.kill("SIGKILL") } catch {}
     }
   }
 
@@ -156,8 +270,11 @@ export class MuseSdkRuntime {
         sessionId: this.sessionId, input,
         ...(effort ? { reasoningEffort: effort } : {}),
       }, { commandId })
-      if (result.status !== "accepted" || result.disposition === "queued" || result.disposition === "steered") {
-        throw runtimeError(`turn was not started immediately (${result.status}, ${result.disposition})`)
+      // A previous completed turn may still be settling inside Muse. A queued
+      // acknowledgement admits this exact turn; await its events instead of
+      // treating it as a failure (or resubmitting and duplicating the input).
+      if (result.status !== "accepted" || result.disposition === "steered") {
+        throw runtimeError(`turn was not admitted as a new turn (${result.status}, ${result.disposition})`)
       }
       if (result.turnId && result.turnId !== active.turnId) throw runtimeError("turn/start returned an unexpected turnId")
     } catch (error) {
@@ -201,7 +318,7 @@ export class MuseSdkRuntime {
         const rows = active.usage.length ? active.usage : p.usage ? [usageRow(p.usage)] : []
         active.onComplete({ models: rows })
       } else {
-        active.onError(runtimeError(p.error?.message || p.reason || `turn ended: ${p.terminal}`, p.error?.quota ? "quota" : p.error?.kind))
+        active.onError(normalizeRuntimeError({ ...p.error, message: p.error?.message || p.reason || `turn ended: ${p.terminal}` }))
       }
     } else if (method === "turn/unqueued") {
       this.fail(runtimeError("turn was removed before it ran"))
@@ -213,7 +330,7 @@ export class MuseSdkRuntime {
   fail(error) {
     const active = this.active
     this.active = null
-    if (active) active.onError(error)
+    if (active) active.onError(normalizeRuntimeError(error))
   }
 
   close() {

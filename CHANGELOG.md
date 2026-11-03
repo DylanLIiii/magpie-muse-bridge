@@ -2,6 +2,10 @@
 
 ## 0.2.0
 
+- Add Magpie browser/device sign-in through the official `muse login` CLI, plus
+  keyless reuse of existing Muse sign-in. Magpie stores only a connection marker.
+  Handle cancellation, expiry, replaced attempts, verification and plugin exit;
+  keep Magpie disconnect separate from the shared CLI's `muse logout`.
 - Default to official `@muse-code/sdk` 1.4.14 with a persistent
   `muse serve --preset empty` host per conversation.
 - Configure client tools in each conversation's private host settings, including
@@ -15,6 +19,9 @@
   host tests check that only client MCP tools reach the model.
 - Forward text, native image parts and counted-once token usage; surface
   authentication, quota, host-loss and capability failures.
+- Normalize classified SDK errors before any model output, propagate credential
+  refreshes promptly, normalize JPEG media types, and synchronously terminate
+  owned host groups when the plugin process exits.
 - Keep the original implementation available with `MUSE_BRIDGE_TRANSPORT=exec`.
 - Add offline SDK/MCP tests and CI. SDK and CLI tests use local fake providers;
   real subscription authentication and billing remain unverified.

@@ -47,8 +47,40 @@ magpie plugin add ./magpie-muse-bridge
 magpie plugin login muse-bridge
 ```
 
-Sign-in runs `muse usage` with the bridge's isolated config; the CLI keeps the
-credentials. Models show up as `muse-bridge/<model>`:
+The Magpie account picker offers **Sign in with Muse** and **Use existing Muse
+sign-in**. The first starts the official `muse login` process and shows its
+HTTPS approval link and copyable device code. Magpie waits for the same CLI to
+finish and verifies the account with `muse usage`; it stores only a non-secret
+`muse` connection marker. The second method only verifies an existing CLI login.
+In a terminal you can select them explicitly:
+
+```sh
+magpie plugin login muse-bridge 1  # browser/device approval via official CLI
+magpie plugin login muse-bridge 2  # reuse existing Muse sign-in
+```
+
+The login is shared with your official Muse CLI. The bridge does not implement
+Meta OAuth or store tokens in Magpie. Login runs with a private settings context
+and the shared `auth.json` link, so Magpie's upstream rewrite cannot create a
+proxy loop. Credential refreshes are synchronized at turn completion, failure,
+and host exit, including immediate plugin-process exit.
+
+If `META_API_KEY` is set on the Magpie host, it still takes precedence for model
+requests after browser login. The sign-in UI warns about this; remove the key
+from that host's environment to use the browser account. Magpie disconnects with
+`magpie plugin logout muse-bridge`; it removes the marker but preserves the
+shared Muse login. Run **`muse logout` yourself** to clear that CLI login too.
+Finish or cancel active Muse turns before changing accounts through the plugin.
+
+Browser sign-in uses the CLI's human-readable URL/code display, not a stable
+JSON interface. Parsing, cancellation, timeout, rejection, duplicate sign-ins,
+and marker storage are tested with a local fake Muse executable, including the
+installed Magpie 0.1.1825 host. The exact display and Keychain behavior of a real
+Meta sign-in have **not** been tested. If the CLI's display changes or Magpie is
+too old to cancel the flow, a bounded timeout cleans it up; use `muse login` in
+a terminal and then the existing-login method.
+
+Models show up as `muse-bridge/<model>`:
 `muse-wonder-full-1.0`, `muse-wonder-1.0`, `muse-spark-1.3`, `muse-spark-1.2`.
 Thinking variants map to MSP `turn/start.reasoningEffort` (minimal … max).
 The requested model must appear under Meta in the host's `model/list` catalog;
@@ -83,7 +115,8 @@ in the environment of the Magpie plugin host and restart that host.
   appear in your `muse resume` list. `auth.json` is a symlink to your real one
   (`${XDG_CONFIG_HOME:-~/.config}/muse/auth.json`). If muse replaces the link
   with a regular file, the bridge copies it back atomically and restores the
-  link after host shutdown. SDK hosts run with `--preset empty`, user-input
+  link promptly after turns and host exit. `MUSE_AUTH_PATH` is a bridge-side
+  override for that shared file, not a documented Muse CLI option. SDK hosts run with `--preset empty`, user-input
   requests withheld, and Contributor mode off. The reminder roster is empty to
   prevent extra observer model calls. The session's
   `allowAll` approval mode applies only to the bridge MCP tools; actual operations
@@ -128,19 +161,23 @@ in the environment of the Magpie plugin host and restart that host.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MUSE_PATH` | `muse` on `PATH`, `~/.local/bin/muse` | CLI to run |
+| `MUSE_AUTH_PATH` | user's Muse `auth.json` | optional bridge-side shared credential file override; CLI authentication and Keychain access remain CLI-owned |
 | `MUSE_BRIDGE_TRANSPORT` | `sdk` | `sdk` uses the official MSP SDK; `exec` explicitly selects the legacy CLI transport. No automatic fallback. |
 | `MUSE_BRIDGE_MAX_ACTIVE` | 4 | muse runs in flight at once |
 | `MUSE_BRIDGE_TURN_TIMEOUT_MS` | 600000 | silence from muse before a turn fails |
 | `MUSE_BRIDGE_TOOL_TIMEOUT_MS` | 1800000 | bridge wait for a tool result; both transports set native MCP `tool_timeout_sec` to this budget plus 60 seconds |
 | `MUSE_BRIDGE_FIRST_EVENT_MS` | 15000 | how long the HTTP answer waits for muse's first event |
 | `MUSE_BRIDGE_BASE_URL` | unset | explicit upstream override for testing; SDK sets `endpoint_transport.base_url`, exec passes `--base-url`. Do not point back at this Muse provider. |
+| `MUSE_BRIDGE_LOGIN_DISCOVERY_MS` | 30000 | maximum wait for the CLI's displayed approval URL/code; may only shorten this budget |
+| `MUSE_BRIDGE_LOGIN_TIMEOUT_MS` | 540000 | total device-login deadline, including an abandoned callback; may only shorten this budget |
 
 ## Development
 
 ```sh
 npm run check
-npm test                             # deterministic MSP host, official SDK, real MCP helper
-bun test-sdk.mjs                     # the same SDK transport suite under Bun
+npm test                             # deterministic SDK, auth and owned-process cleanup tests
+npm run test:bun                     # the same suites under Bun
+MUSE_TEST_MAGPIE_AUTH=1 node test-auth-magpie.mjs # installed Magpie + fake Muse, isolated config; no real login
 MUSE_TEST_BIN=/path/to/muse node test-sdk.mjs # real SDK host + local fake Meta; no paid model calls
 MUSE_TEST_SLOW=1 MUSE_TEST_BIN=/path/to/muse node test-sdk.mjs # also hold an MCP call for 75 seconds
 MUSE_TEST_BIN=/path/to/muse npm run test:exec # original exec regression suite

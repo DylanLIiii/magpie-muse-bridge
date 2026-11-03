@@ -3,7 +3,7 @@
 // MUSE_SDK_TEST_LOG=/tmp/muse.jsonl ./test/fixtures/fake-muse.mjs serve --preset empty
 // MUSE_SDK_TEST_DENY_CAP=1 withholds sessionMcp. Only CLI words and methods are logged.
 import { spawn } from 'node:child_process'
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { EXPECTED_SCHEMA_FINGERPRINT, createUuidV7Mint } from '@muse-code/sdk'
@@ -84,6 +84,17 @@ async function run(s, turn, prompt) {
   if (s.active !== turn || closing) return
   event(s, 'turn/started', { turnId: turn.id, commandId: turn.id })
   const current = currentTurn(prompt)
+  if (current.includes('SDK_REFRESH_AUTH')) {
+    const auth = path.join(process.env.XDG_CONFIG_HOME, 'muse/auth.json')
+    writeFileSync(auth + '.new', JSON.stringify({ fixtureCredential: turn.id }), { mode: 0o600 })
+    renameSync(auth + '.new', auth)
+  }
+  if (current.includes('SDK_CHECK_JPEG')) {
+    const image = turn.input.find(part => part.type === 'image')
+    if (image?.mediaType !== 'image/jpeg') {
+      complete(s, turn, 'failed', { kind: 'modelError', message: 'Noncanonical JPEG type', retryable: false }); return
+    }
+  }
   if (current.includes('SDK_STDERR')) {
     process.stderr.write('fixture diagnostic for the current SDK turn\n')
     await new Promise(resolve => setTimeout(resolve, 15))
@@ -175,12 +186,12 @@ async function dispatch(frame) {
     const prompt = (p.input || []).filter(part => part.type === 'text').map(part => part.text || '').join('\n')
     if (currentTurn(prompt).includes('SDK_UNSUPPORTED')) { refuse(id, -32601, 'SDK surface unsupported (fixture)'); return }
     if (s.active) { refuse(id, -32030, 'Session busy', { kind: 'commandRejected' }); return }
-    const turn = { id: p.commandId || mint() }
+    const turn = { id: p.commandId || mint(), input: p.input || [] }
     s.active = turn
     s.users++
     s.session.activeTurnId = turn.id
     s.session.status = 'running'
-    reply(id, { commandId: p.commandId, status: 'accepted', disposition: 'started', startedNewTurn: true, turnId: turn.id })
+    reply(id, { commandId: p.commandId, status: 'accepted', disposition: currentTurn(prompt).includes('SDK_QUEUE') ? 'queued' : 'started', startedNewTurn: true, turnId: turn.id })
     setImmediate(() => run(s, turn, prompt).catch(() => complete(s, turn, 'failed', { kind: 'mcpLinkError', message: 'Fixture MCP request failed', retryable: false })))
     return
   }

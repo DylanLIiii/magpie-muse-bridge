@@ -141,6 +141,38 @@ try {
       successful(await call({ messages: [user("after real auth failure")] }))
     })
   } else {
+    await step("an accepted queued turn waits for its own events without resubmitting", async () => {
+      const r = await call({ messages: [user("SDK_QUEUE")] })
+      successful(r); assert.equal(r.content[0].text, "REPLY users=1 history=no")
+    })
+    await step("SDK JPEG aliases are normalized before model admission", async () => {
+      const r = await call({ messages: [{ role: "user", content: [
+        { type: "text", text: "SDK_CHECK_JPEG" },
+        { type: "image", source: { type: "base64", media_type: "image/jpg", data: "ZmFrZSBqcGVnIGZvciBNU1AgZml4dHVyZQ==" } },
+      ] }] })
+      successful(r)
+    })
+    await step("SDK refresh writes back immediately on successful and failed turns", async () => {
+      for (const text of ["SDK_REFRESH_AUTH", "SDK_REFRESH_AUTH SDK_AUTH"]) {
+        const r = await call({ messages: [user(text)] })
+        assert.equal(r.status, text.includes("SDK_AUTH") ? 401 : 200)
+        const target = path.join(process.env.XDG_CONFIG_HOME, "muse/auth.json")
+        assert.ok(JSON.parse(fs.readFileSync(target, "utf8")).fixtureCredential)
+        const conv = [..._test.pool.values()].find(c => c.convKey === _test.conversationKey({ messages: [user(text)] }, "muse-spark-1.3"))
+        assert.ok(fs.lstatSync(path.join(conv.dirs.config, "muse/auth.json")).isSymbolicLink())
+      }
+    })
+    await step("SDK idle exit synchronizes refreshed sign-in without eviction", async () => {
+      const a = await call({ messages: [user("idle auth fixture")] }); successful(a)
+      const conv = getConv("idle auth fixture")
+      const local = path.join(conv.dirs.config, "muse/auth.json")
+      fs.unlinkSync(local)
+      fs.writeFileSync(local, JSON.stringify({ fixtureCredential: "idle-host-refresh" }))
+      await conv.runtime.host.close()
+      const target = path.join(process.env.XDG_CONFIG_HOME, "muse/auth.json")
+      assert.equal(JSON.parse(fs.readFileSync(target, "utf8")).fixtureCredential, "idle-host-refresh")
+      assert.ok(fs.lstatSync(local).isSymbolicLink())
+    })
     await step("lost ephemeral session replays full caller history in the same request", async () => {
       const messages = [user("SDK ephemeral history")]
       const a = await call({ messages }); successful(a)

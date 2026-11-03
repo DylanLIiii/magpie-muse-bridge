@@ -160,7 +160,7 @@ try {
 
   await step("authorize fails clearly when muse is signed out", async () => {
     delete process.env.META_API_KEY
-    const result = await plugin.auth.methods[0].authorize()
+    const result = await plugin.auth.methods.find((method) => method.keyless).authorize()
     process.env.META_API_KEY = "dummy-test-key"
     assert.equal(result.type, "failed")
     assert.match(result.error, /not signed in.*not logged in/s)

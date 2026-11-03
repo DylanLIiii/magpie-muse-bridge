@@ -6,6 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { MuseSdkRuntime } from "./sdk-runtime.mjs"
+import { createMuseAuth, isMuseLoginPending } from "./muse-auth.mjs"
 
 const PROVIDER_ID = "muse-bridge"
 const TRANSPORT = process.env.MUSE_BRIDGE_TRANSPORT || "sdk"
@@ -38,6 +39,9 @@ const MODELS = [
 
 const pool = new Map()
 const liveTurns = new Set()
+// Include hosts already closing after reset/eviction: they no longer have a
+// conv.runtime pointer but still need synchronous cleanup if the plugin exits.
+const sdkRuntimes = new Set()
 const sessions = new Map()
 const toolCalls = new Map()
 let cachedMusePath
@@ -256,6 +260,7 @@ class Conv {
       const runtime = this.runtime
       this.runtime = null
       this.runtimeClosing = runtime.close().then(() => syncAuth(this.dirs.config))
+        .finally(() => sdkRuntimes.delete(runtime))
     }
   }
 
@@ -605,6 +610,7 @@ class SdkTurn extends Turn {
   async startSdk() {
     await this.conv.runtimeClosing
     if (this.finalized || this.done) return
+    const conv = this.conv
     // MSP's session MCP schema omits tool_timeout_sec. This conversation owns
     // its entire host, so use native host settings to retain long client waits.
     // Do not also inject the same server in session/start: that is a name conflict.
@@ -616,11 +622,13 @@ class SdkTurn extends Turn {
       env: { ...museEnv(this.conv.dirs), MUSE_CONTRIBUTOR_MODE: "0" },
       baseURL: process.env.MUSE_BRIDGE_BASE_URL,
       onStderr: (chunk) => {
-        const current = this.conv.turn
+        const current = conv.turn
         if (current) current.stderrTail = (current.stderrTail + chunk).slice(-STDERR_TAIL)
       },
+      onExit: () => syncAuth(conv.dirs.config),
       onWarning: (message) => console.warn(`muse bridge: ${message}`),
     })
+    sdkRuntimes.add(this.runtime)
     await this.runtime.start({
       model: this.model, effort: this.effort,
       prompt: this.prompt, images: this.images,
@@ -633,6 +641,7 @@ class SdkTurn extends Turn {
       onText: (text) => { this.sawText = true; this.push({ type: "text", text }) },
       onComplete: (usage) => {
         if (this.finalized || this.done) return
+        syncAuth(this.conv.dirs.config)
         this.done = true
         this.exited = true
         this.usage = usage
@@ -646,6 +655,7 @@ class SdkTurn extends Turn {
 
   sdkFailed(error) {
     if (this.finalized || this.done) return
+    syncAuth(this.conv.dirs.config)
     const tail = this.stderrTail.trim()
     if (tail && !error.message.includes(tail)) error.message += `\n${tail}`
     this.fail(error)
@@ -843,6 +853,7 @@ function normalizeTools(body) {
 }
 
 const IMAGE_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/gif": "gif", "image/webp": "webp" }
+const IMAGE_MEDIA = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp" }
 
 // blockText renders a user block as prompt text. Images in the current turn
 // go to sink (and on to `muse exec --image`); older ones become a marker.
@@ -864,7 +875,7 @@ function blockText(block, sink) {
       throw new UnsupportedContent("an image that is not base64 PNG/JPEG/GIF/WebP")
     }
     if (!sink) return "[image attached earlier in the conversation]"
-    sink.push({ data: block.source.data, ext, mediaType: String(block.source.media_type).toLowerCase() })
+    sink.push({ data: block.source.data, ext, mediaType: IMAGE_MEDIA[ext] })
     return `[image ${sink.length} attached]`
   }
   if (block.type === "document") throw new UnsupportedContent("a document block")
@@ -1355,6 +1366,7 @@ async function respond(conv, turn, body, signal) {
 }
 
 async function handleRequest(init) {
+  if (isMuseLoginPending()) return jsonError(503, "Muse sign-in is in progress. Finish or cancel it before sending model requests.")
   if (!["sdk", "exec"].includes(TRANSPORT)) return jsonError(503, "MUSE_BRIDGE_TRANSPORT must be sdk or exec")
   const musePath = findMuse()
   if (!musePath) return jsonError(503, "muse CLI not found on this machine; install Muse Code: https://dev.meta.ai")
@@ -1445,11 +1457,13 @@ async function handleRequest(init) {
   }
 }
 
-async function checkSignIn(musePath) {
+async function checkSignIn(musePath, { browserOnly = false } = {}) {
   const dirs = makeDirs(path.join(ensureBridgeRoot(), "probe-" + randomUUID()))
   try {
     fs.writeFileSync(path.join(dirs.config, "muse", "settings.json"), JSON.stringify({ schema_version: 1 }), { mode: 0o600 })
-    const probe = await execOnce(musePath, ["usage"], { cwd: dirs.work, env: museEnv(dirs), timeoutMs: 30_000 })
+    const env = museEnv(dirs)
+    if (browserOnly) delete env.META_API_KEY
+    const probe = await execOnce(musePath, ["usage"], { cwd: dirs.work, env, timeoutMs: 30_000 })
     syncAuth(dirs.config)
     return probe
   } finally {
@@ -1481,37 +1495,28 @@ function modelEntry(model) {
 }
 
 export const MuseBridgePlugin = async () => {
+  const auth = createMuseAuth({
+    findMuse, checkSignIn,
+    beforeLogin: async () => {
+      if (liveTurns.size) throw new Error("Finish or cancel active Muse requests before changing the Muse account.")
+      const previous = [...pool.values()]
+      for (const conv of previous) conv.dispose()
+      await Promise.all(previous.map((conv) => conv.runtimeClosing))
+    },
+    createLoginContext: () => {
+      // Isolate model/provider settings from Magpie's own endpoint rewrite, but
+      // let the official CLI load and save the user's sign-in through auth.json.
+      const dirs = makeDirs(path.join(ensureBridgeRoot(), "login-" + randomUUID()))
+      fs.writeFileSync(path.join(dirs.config, "muse/settings.json"), JSON.stringify({ schema_version: 1 }), { mode: 0o600 })
+      return { cwd: dirs.work, env: museEnv(dirs), cleanup: async () => {
+        syncAuth(dirs.config)
+        await fs.promises.rm(dirs.base, { recursive: true, force: true })
+      } }
+    },
+  })
   return {
     auth: {
-      provider: PROVIDER_ID,
-      single: true,
-      methods: [
-        {
-          type: "api",
-          keyless: true,
-          label: "Use the muse CLI's sign-in",
-          authorize: async () => {
-            const muse = findMuse()
-            if (!muse) {
-              return {
-                type: "failed",
-                error: "muse CLI not found. Install Muse Code (curl -fsSL https://dev.meta.ai/install.sh | bash), then run `muse login`.",
-              }
-            }
-            const probe = await checkSignIn(muse)
-            if (probe.err || probe.code !== 0) {
-              const why = probe.timedOut
-                ? "timed out after 30s"
-                : (probe.stderr || probe.stdout || "").trim().split("\n").slice(-3).join(" ") || probe.err?.message || "unknown error"
-              return {
-                type: "failed",
-                error: `muse at ${muse} is not signed in (${why}). Run \`muse login\` in a terminal, then try again.`,
-              }
-            }
-            return { type: "success", key: "muse" }
-          },
-        },
-      ],
+      ...auth,
       loader: async () => ({
         baseURL: "muse://local",
         apiKey: "muse",
@@ -1540,7 +1545,10 @@ function jsonError(status, message, headers = {}) {
 }
 
 process.once("exit", () => {
-  for (const conv of pool.values()) conv.runtime?.close()
+  for (const conv of pool.values()) {
+    syncAuth(conv.dirs.config)
+  }
+  for (const runtime of sdkRuntimes) runtime.killNow()
   for (const turn of liveTurns) {
     try { turn.child?.kill("SIGKILL") } catch {}
   }
