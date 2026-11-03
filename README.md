@@ -93,6 +93,23 @@ an unavailable model is rejected instead of silently switching providers.
 To explicitly keep the original CLI transport, set `MUSE_BRIDGE_TRANSPORT=exec`
 in the environment of the Magpie plugin host and restart that host.
 
+## Subscription allowance
+
+The account's allowance appears in **Providers** and **Usage**, and through
+`magpie quota muse-bridge --json` or the gateway's `/v1/magpie/quotas` endpoint.
+The plugin reads the official `muse usage --json` command without a model turn,
+using the same isolated settings and shared CLI login as its sign-in check.
+When Muse reports them, Magpie shows the tier, current-window and weekly **used
+percentages**, reset times and the reading's **As of** timestamp. Muse does not
+report absolute token limits here. A missing duration is not assumed to be
+five hours, and unavailable usage is never treated as zero or unlimited.
+
+If Muse returns `server_sent_no_usage`, the account instead says **Muse has not
+returned usage data for this subscription yet**. This can happen before use in
+a new window. The plugin preserves the login and does not make a model request
+to generate usage. API-key connections and accounts without a reported allowance
+also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
+
 ## How it works
 
 - **One host per conversation.** The SDK initializes MSP, verifies the

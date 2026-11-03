@@ -4,6 +4,9 @@
 
 - Offer existing Muse login inside the main UI sign-in flow as well as the
   keyless method, including UI paths that open the first auth method directly.
+- Report Muse subscription allowance through Magpie's usage hook, including
+  current/weekly percentages, reset times, tier and snapshot time. Read only
+  `muse usage --json`; explain missing server data without inventing a quota.
 
 ## 0.2.0
 

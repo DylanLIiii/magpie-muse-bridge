@@ -56,6 +56,8 @@ try {
   assert.match(reused.stdout + reused.stderr, /Use existing Muse sign-in/)
   const calls = fs.readFileSync(env.MUSE_TEST_AUTH_LOG, "utf8").trim().split("\n").map(JSON.parse)
   assert.equal(calls.filter(r => r.args[0] === "login").length, 1, "existing sign-in must not restart browser auth")
+  const listed = JSON.parse((await run(["plugin", "list", "--json"])).stdout)
+  assert.equal(listed.providers.find(p => p.id === "muse-bridge").usage, true)
   await run(["plugin", "logout", "muse-bridge"])
   assert.equal(fs.existsSync(env.MUSE_TEST_AUTH_STATE), true, "Magpie disconnect must preserve official CLI login")
   env.MUSE_TEST_AUTH_MODE = "early-failure"

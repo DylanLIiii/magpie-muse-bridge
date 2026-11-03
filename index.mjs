@@ -7,6 +7,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { MuseSdkRuntime } from "./sdk-runtime.mjs"
 import { createMuseAuth, isMuseLoginPending } from "./muse-auth.mjs"
+import { createMuseUsage } from "./muse-usage.mjs"
 
 const PROVIDER_ID = "muse-bridge"
 const TRANSPORT = process.env.MUSE_BRIDGE_TRANSPORT || "sdk"
@@ -1457,13 +1458,13 @@ async function handleRequest(init) {
   }
 }
 
-async function checkSignIn(musePath, { browserOnly = false } = {}) {
+async function checkSignIn(musePath, { browserOnly = false, json = false } = {}) {
   const dirs = makeDirs(path.join(ensureBridgeRoot(), "probe-" + randomUUID()))
   try {
     fs.writeFileSync(path.join(dirs.config, "muse", "settings.json"), JSON.stringify({ schema_version: 1 }), { mode: 0o600 })
     const env = museEnv(dirs)
     if (browserOnly) delete env.META_API_KEY
-    const probe = await execOnce(musePath, ["usage"], { cwd: dirs.work, env, timeoutMs: 30_000 })
+    const probe = await execOnce(musePath, json ? ["usage", "--json"] : ["usage"], { cwd: dirs.work, env, timeoutMs: 30_000 })
     syncAuth(dirs.config)
     return probe
   } finally {
@@ -1517,6 +1518,7 @@ export const MuseBridgePlugin = async () => {
   return {
     auth: {
       ...auth,
+      usage: createMuseUsage({ findMuse, readUsage: (muse) => checkSignIn(muse, { json: true }), isSigningIn: isMuseLoginPending }),
       loader: async () => ({
         baseURL: "muse://local",
         apiKey: "muse",

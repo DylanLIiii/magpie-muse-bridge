@@ -8,13 +8,14 @@
     "index.mjs",
     "sdk-runtime.mjs",
     "muse-auth.mjs",
+    "muse-usage.mjs",
     "mcp-server.mjs",
     "README.md"
   ],
   "scripts": {
-    "check": "node --check index.mjs && node --check sdk-runtime.mjs && node --check muse-auth.mjs && node --check mcp-server.mjs && node --check test-auth.mjs && node --check test-auth-magpie.mjs && node --check test-runtime-review.mjs && node --check test-sdk.mjs && node --check test/fixtures/fake-muse.mjs && node --check test/fixtures/fake-muse-auth.mjs && node --check test-harness.mjs && node --check test-real-muse.mjs && node --check test-failures.mjs && node --check test-edges.mjs && node --check test-magpie-backend.mjs",
-    "test": "node test-sdk.mjs && node test-auth.mjs && node test-runtime-review.mjs",
-    "test:bun": "bun test-sdk.mjs && bun test-auth.mjs && bun test ./test-runtime-review.mjs",
+    "check": "node --check index.mjs && node --check sdk-runtime.mjs && node --check muse-auth.mjs && node --check muse-usage.mjs && node --check mcp-server.mjs && node --check test-auth.mjs && node --check test-auth-magpie.mjs && node --check test-usage.mjs && node --check test-runtime-review.mjs && node --check test-sdk.mjs && node --check test/fixtures/fake-muse.mjs && node --check test/fixtures/fake-muse-auth.mjs && node --check test-harness.mjs && node --check test-real-muse.mjs && node --check test-failures.mjs && node --check test-edges.mjs && node --check test-magpie-backend.mjs",
+    "test": "node test-sdk.mjs && node test-auth.mjs && node test-usage.mjs && node test-runtime-review.mjs",
+    "test:bun": "bun test-sdk.mjs && bun test-auth.mjs && bun test-usage.mjs && bun test ./test-runtime-review.mjs",
     "test:exec": "node test-real-muse.mjs && node test-failures.mjs && node test-edges.mjs"
   },
   "keywords": [
