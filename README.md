@@ -5,7 +5,7 @@ A [magpie](https://github.com/yetone/magpie) provider plugin built on the
 
 Each conversation keeps one SDK-owned `muse serve --preset empty` process.
 The empty preset removes built-in tools; the client's tools are supplied as a
-session MCP server. Muse handles upstream authentication and model calls.
+MCP server in that conversation's private host settings. Muse handles upstream authentication and model calls.
 An explicit `exec` mode retains the original per-turn CLI implementation.
 
 The SDK uses the CLI's configured credential. This has been tested with a local
@@ -62,7 +62,10 @@ in the environment of the Magpie plugin host and restart that host.
 - **One host per conversation.** The SDK initializes MSP, verifies the
   `sessionMcp` grant, creates a session, and submits turns. A second user message
   reuses the same live host/session. A stopped idle host can resume the durable
-  session. Schema fingerprint/version mismatches warn; missing capabilities fail.
+  session. If a host restarts and the session is definitively missing, the same
+  request creates a new session and replays caller history before any new turn
+  is submitted. A session owned by another host is never replayed automatically.
+  Schema fingerprint/version mismatches warn; missing capabilities fail.
   Edits, compaction, aborted turns, model/workspace changes, and changed tool
   definitions create a fresh session with caller history rendered once. Ambiguous
   turn admission is not automatically retried.
@@ -74,15 +77,15 @@ in the environment of the Magpie plugin host and restart that host.
   context notices (`<system-update>`, task notifications) work the same way
   they do in the antigravity bridge.
 - **Isolation.** Each conversation gets its own `XDG_CONFIG_HOME`,
-  `XDG_DATA_HOME`, and `XDG_STATE_HOME`. Its MCP server is injected using
-  `session/start.config.mcpServers`, so your own MCP servers stay out, and magpie's rewrite of
+  `XDG_DATA_HOME`, and `XDG_STATE_HOME`. Its private `settings.json` declares
+  only the bridge MCP server, so your own MCP servers stay out, and magpie's rewrite of
   your muse `endpoint_transport` to its gateway can't loop back. Sessions don't
   appear in your `muse resume` list. `auth.json` is a symlink to your real one
   (`${XDG_CONFIG_HOME:-~/.config}/muse/auth.json`). If muse replaces the link
   with a regular file, the bridge copies it back atomically and restores the
   link after host shutdown. SDK hosts run with `--preset empty`, user-input
-  requests withheld, and Contributor mode off. The six bundled reminder
-  capabilities are disabled to prevent extra observer model calls. The session's
+  requests withheld, and Contributor mode off. The reminder roster is empty to
+  prevent extra observer model calls. The session's
   `allowAll` approval mode applies only to the bridge MCP tools; actual operations
   and permissions stay in the requesting client. Unexpected approvals/questions
   fail the turn. `MUSE_LOGIN=0` prevents interactive sign-in.
@@ -112,7 +115,9 @@ in the environment of the Magpie plugin host and restart that host.
 - **Process limits:** hosts stay live until conversation eviction (30-minute
   idle expiry, up to 32 cached conversations). Only four foreground runs are
   admitted by default. A cold host still has a startup cost; follow-up turns
-  avoid it. SDK MCP call timeouts use the host's supported default.
+  avoid it. Native MCP timeouts are configured above the bridge's tool-result
+  wait budget. Host settings are used because the public MSP per-session MCP
+  schema has no timeout field; each host serves only its owning conversation.
 - **One account**, whichever one `muse login` signed in.
 - **macOS Keychain:** muse may keep part of its credential in the Keychain.
   This wasn't verified with a real login. If the isolated config breaks
@@ -126,7 +131,7 @@ in the environment of the Magpie plugin host and restart that host.
 | `MUSE_BRIDGE_TRANSPORT` | `sdk` | `sdk` uses the official MSP SDK; `exec` explicitly selects the legacy CLI transport. No automatic fallback. |
 | `MUSE_BRIDGE_MAX_ACTIVE` | 4 | muse runs in flight at once |
 | `MUSE_BRIDGE_TURN_TIMEOUT_MS` | 600000 | silence from muse before a turn fails |
-| `MUSE_BRIDGE_TOOL_TIMEOUT_MS` | 1800000 | bridge wait for a tool result; exec also configures MCP `tool_timeout_sec`; SDK host timeouts may fire earlier |
+| `MUSE_BRIDGE_TOOL_TIMEOUT_MS` | 1800000 | bridge wait for a tool result; both transports set native MCP `tool_timeout_sec` to this budget plus 60 seconds |
 | `MUSE_BRIDGE_FIRST_EVENT_MS` | 15000 | how long the HTTP answer waits for muse's first event |
 | `MUSE_BRIDGE_BASE_URL` | unset | explicit upstream override for testing; SDK sets `endpoint_transport.base_url`, exec passes `--base-url`. Do not point back at this Muse provider. |
 
@@ -137,6 +142,7 @@ npm run check
 npm test                             # deterministic MSP host, official SDK, real MCP helper
 bun test-sdk.mjs                     # the same SDK transport suite under Bun
 MUSE_TEST_BIN=/path/to/muse node test-sdk.mjs # real SDK host + local fake Meta; no paid model calls
+MUSE_TEST_SLOW=1 MUSE_TEST_BIN=/path/to/muse node test-sdk.mjs # also hold an MCP call for 75 seconds
 MUSE_TEST_BIN=/path/to/muse npm run test:exec # original exec regression suite
 MUSE_TEST_SLOW=1 MUSE_TEST_BIN=… node test-real-muse.mjs   # adds a 75 s tool wait
 MUSE_TEST_MAGPIE=1 MUSE_TEST_BIN=… node test-magpie-backend.mjs   # real model via a local magpie; spends tokens

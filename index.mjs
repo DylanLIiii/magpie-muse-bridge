@@ -300,6 +300,7 @@ class Turn {
     this.sessionId = conv.sessionId
     this.musePath = opts.musePath
     this.prompt = opts.prompt
+    this.body = opts.body
     this.images = opts.images
     this.tools = opts.tools
     this.toolsSignature = JSON.stringify(opts.tools)
@@ -604,25 +605,29 @@ class SdkTurn extends Turn {
   async startSdk() {
     await this.conv.runtimeClosing
     if (this.finalized || this.done) return
+    // MSP's session MCP schema omits tool_timeout_sec. This conversation owns
+    // its entire host, so use native host settings to retain long client waits.
+    // Do not also inject the same server in session/start: that is a name conflict.
+    if (!this.conv.runtime) writeSettings(this.conv, this.tools.length > 0)
     this.runtime = this.conv.runtime ??= new MuseSdkRuntime({
       command: this.musePath,
       model: this.model,
       cwd: this.conv.dirs.work,
       env: { ...museEnv(this.conv.dirs), MUSE_CONTRIBUTOR_MODE: "0" },
       baseURL: process.env.MUSE_BRIDGE_BASE_URL,
-      onStderr: (chunk) => { this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL) },
+      onStderr: (chunk) => {
+        const current = this.conv.turn
+        if (current) current.stderrTail = (current.stderrTail + chunk).slice(-STDERR_TAIL)
+      },
       onWarning: (message) => console.warn(`muse bridge: ${message}`),
     })
-    const mcpServers = this.tools.length ? {
-      [MCP_SERVER_NAME]: {
-        transport: "stdio", command: process.execPath, args: [MCP_SERVER_PATH],
-        env: { MUSE_BRIDGE_CONTROL_PORT: String(controlServer.address().port), MUSE_BRIDGE_TOKEN: this.conv.token },
-        mode: "required",
-      },
-    } : {}
     await this.runtime.start({
       model: this.model, effort: this.effort,
-      prompt: this.prompt, images: this.images, mcpServers,
+      prompt: this.prompt, images: this.images,
+      replayInput: () => {
+        const images = []
+        return { prompt: renderInitialPrompt(this.body, this.conv.workDir, this.tools, images), images }
+      },
       onSession: (sessionId) => { this.sessionId = sessionId; this.conv.sessionId = sessionId },
       onActivity: () => this.touch(),
       onText: (text) => { this.sawText = true; this.push({ type: "text", text }) },
@@ -1432,7 +1437,7 @@ async function handleRequest(init) {
       conv.toolsSignature = JSON.stringify(tools)
       const images = []
       const prompt = resume ? renderContinuedTurn(body, images) : renderInitialPrompt(body, callerWorkDir, tools, images)
-      const turn = conv.startTurn({ musePath, prompt, images, tools, model, effort, messages: body.messages })
+      const turn = conv.startTurn({ musePath, prompt, images, tools, model, effort, body, messages: body.messages })
       return await respond(conv, turn, body, init.signal)
     })
   } catch (error) {

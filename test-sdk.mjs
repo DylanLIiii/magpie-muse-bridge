@@ -2,6 +2,8 @@
 // helper. MUSE_TEST_BIN runs the same happy-path checks with the real Muse host
 // against test-harness's local fake Meta upstream (no login or paid inference).
 import assert from "node:assert/strict"
+import fs from "node:fs"
+import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { startHarness, echoTool } from "./test-harness.mjs"
 
@@ -10,7 +12,7 @@ const fixture = fileURLToPath(new URL("./test/fixtures/fake-muse.mjs", import.me
 const h = await startHarness({ bin: process.env.MUSE_TEST_BIN || fixture, env: {
   MUSE_BRIDGE_TRANSPORT: "sdk",
   MUSE_BRIDGE_TURN_TIMEOUT_MS: real ? "30000" : "3000",
-  MUSE_BRIDGE_TOOL_TIMEOUT_MS: "3000",
+  MUSE_BRIDGE_TOOL_TIMEOUT_MS: process.env.MUSE_TEST_SLOW === "1" ? "180000" : "3000",
   MUSE_BRIDGE_FIRST_EVENT_MS: "8000",
 } })
 const { call, request, step, _test } = h
@@ -54,6 +56,8 @@ try {
     assert.equal(use.name, "echo"); assert.deepEqual(use.input, { text: "PING" })
     const conv = getConv("sdk CALL_ONE"), id = conv.sessionId, turn = conv.turn
     assert.ok(turn && !turn.done)
+    const settings = JSON.parse(fs.readFileSync(path.join(conv.dirs.config, "muse/settings.json"), "utf8"))
+    assert.ok(settings.mcpServers.magpie.tool_timeout_sec >= 63)
     const next = await call({ tools: [echoTool], messages: [...messages, assistant(r.content), { role: "user", content: [result(use, "PONG SDK")] }] })
     successful(next); assert.equal(next.content[0].text, "GOT:PONG SDK")
     assert.equal(conv.sessionId, id); assert.equal(conv.turn, null)
@@ -99,6 +103,20 @@ try {
     if (real) assert.ok(h.requests.some((r) => JSON.stringify(r.body.input).includes("input_image")))
   })
   if (real) {
+    if (process.env.MUSE_TEST_SLOW === "1") {
+      await step("real SDK tool call remains pending across a 75-second client operation", async () => {
+        const messages = [user("SDK slow CALL_ONE")]
+        const r = await call({ tools: [echoTool], messages }); assert.equal(r.stop, "tool_use")
+        const conv = getConv("SDK slow CALL_ONE"), id = conv.sessionId
+        await new Promise((resolve) => setTimeout(resolve, 75000))
+        assert.ok(conv.turn && !conv.turn.done)
+        const use = r.content.find((b) => b.type === "tool_use")
+        const next = await call({ tools: [echoTool], messages: [...messages, assistant(r.content), {
+          role: "user", content: [result(use, "LONG SDK RESULT")],
+        }] })
+        successful(next); assert.equal(next.content[0].text, "GOT:LONG SDK RESULT"); assert.equal(conv.sessionId, id)
+      })
+    }
     await step("real host exposes only configured MCP tools with empty preset", async () => {
       const calls = h.requests.filter((r) => r.body?.input)
       assert.ok(calls.length)
@@ -123,6 +141,30 @@ try {
       successful(await call({ messages: [user("after real auth failure")] }))
     })
   } else {
+    await step("lost ephemeral session replays full caller history in the same request", async () => {
+      const messages = [user("SDK ephemeral history")]
+      const a = await call({ messages }); successful(a)
+      const conv = getConv("SDK ephemeral history"), id = conv.sessionId
+      await conv.runtime.host.close()
+      const b = await call({ messages: [...messages, assistant(a.content), user("after missing session")] })
+      successful(b); assert.notEqual(conv.sessionId, id)
+      assert.equal(b.content[0].text, "REPLY users=1 history=yes")
+    })
+    await step("resume refusal for an owned session never starts a duplicate turn", async () => {
+      const messages = [user("SDK busy resume")]
+      const a = await call({ messages }); successful(a)
+      const conv = getConv("SDK busy resume")
+      conv.runtime.options.env.MUSE_SDK_TEST_RESUME_BUSY = "1"
+      await conv.runtime.host.close()
+      const b = await call({ messages: [...messages, assistant(a.content), user("must not replay")] })
+      assert.equal(b.status, 502); assert.match(b.error.error.message, /different host/)
+    })
+    await step("reused host diagnostics belong to the current failing turn", async () => {
+      const messages = [user("SDK stderr history")]
+      const a = await call({ messages }); successful(a)
+      const b = await call({ messages: [...messages, assistant(a.content), user("SDK_STDERR SDK_AUTH")] })
+      assert.equal(b.status, 401); assert.match(b.error.error.message, /diagnostic for the current SDK turn/)
+    })
     await step("SDK usage uses counted prompt totals and never adds terminal usage twice", async () => {
       const r = await call({ messages: [user("SDK_USAGE")] }); successful(r)
       assert.deepEqual(r.usage, { input_tokens: 120, output_tokens: 14, cache_read_input_tokens: 60,

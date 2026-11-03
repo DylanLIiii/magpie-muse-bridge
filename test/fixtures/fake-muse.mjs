@@ -3,7 +3,8 @@
 // MUSE_SDK_TEST_LOG=/tmp/muse.jsonl ./test/fixtures/fake-muse.mjs serve --preset empty
 // MUSE_SDK_TEST_DENY_CAP=1 withholds sessionMcp. Only CLI words and methods are logged.
 import { spawn } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
+import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { EXPECTED_SCHEMA_FINGERPRINT, createUuidV7Mint } from '@muse-code/sdk'
 const sessions = new Map(), children = new Set()
@@ -83,6 +84,10 @@ async function run(s, turn, prompt) {
   if (s.active !== turn || closing) return
   event(s, 'turn/started', { turnId: turn.id, commandId: turn.id })
   const current = currentTurn(prompt)
+  if (current.includes('SDK_STDERR')) {
+    process.stderr.write('fixture diagnostic for the current SDK turn\n')
+    await new Promise(resolve => setTimeout(resolve, 15))
+  }
   if (current.includes('SDK_CRASH')) { process.stderr.write('fake-muse: deliberate SDK_CRASH\n'); await shutdown(17); return }
   if (current.includes('SDK_STALL')) return
   if (current.includes('SDK_AUTH')) { complete(s, turn, 'failed', { kind: 'authRequired', message: 'Authentication required (fixture)', retryable: false, requestDenied: true }); return }
@@ -138,9 +143,15 @@ async function dispatch(frame) {
     if (denyCap && p.config?.mcpServers) { refuse(id, -32010, 'sessionMcp capability required', { kind: 'capabilityRequired', capability: 'sessionMcp' }); return }
     const sessionId = p.sessionId || mint()
     const s = { session: { sessionId, activeTurnId: null, createdAt: timestamp, updatedAt: timestamp, forkedFrom: null, modelId: p.modelId || 'muse-spark-1.3', providerId: p.providerId || 'meta', path: '', status: 'idle', turnCount: 0, workspaceRoot: p.workspaceRoot || p.workspaceRoots?.[0] || process.cwd() }, cursor: 0, users: 0, items: [], mcps: [], active: null, config: p.config || {} }
-    s.mcps = Object.values(s.config.mcpServers || {}).map(config => mcpClient(config, s.session.workspaceRoot))
+    let hostServers = {}
+    try { hostServers = JSON.parse(readFileSync(path.join(process.env.XDG_CONFIG_HOME, 'muse/settings.json'), 'utf8')).mcpServers || {} } catch {}
+    s.mcps = Object.values({ ...hostServers, ...s.config.mcpServers }).map(config =>
+      mcpClient({ ...config, transport: config.transport || config.type }, s.session.workspaceRoot))
     sessions.set(sessionId, s)
     reply(id, { session: s.session, viewCursor: cursor(s) }); return
+  }
+  if (method === 'session/resume' && process.env.MUSE_SDK_TEST_RESUME_BUSY === '1') {
+    refuse(id, -32021, 'Session belongs to a different host', { kind: 'sessionInUse' }); return
   }
   const s = sessions.get(p.sessionId)
   if (!s) { refuse(id, -32011, 'Session not found', { kind: 'notFound' }); return }

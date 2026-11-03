@@ -2,10 +2,6 @@ import { spawnMspConnection } from "@muse-code/sdk"
 
 const SDK_VERSION = "1.4.14"
 const START_TIMEOUT_MS = 30_000
-// Host capabilities are separate from the main model's empty tool preset.
-// Disable the bundled reminder children so a provider request doesn't silently
-// become additional observer inference. Keep these version-pinned with the host.
-const REMINDERS = ["memory", "skill-reminder", "todo-reminder", "goal-reminder", "verify-reminder", "scope-reminder"]
 
 function runtimeError(message, kind) {
   const error = new Error(`muse SDK: ${message}`)
@@ -53,9 +49,9 @@ export class MuseSdkRuntime {
   async openHost() {
     const args = ["serve", "--preset", "empty", "--disable-request-user-input", "--contributor-mode", "off"]
     args.push("--provider", "meta", "--model", this.options.model)
-    args.push("-c", `runtime_capabilities=${JSON.stringify(Object.fromEntries(
-      REMINDERS.map((name) => [`plugin:tbh-reminders:reminder:${name}`, { enabled: false }]),
-    ))}`)
+    // Main tool presets do not disable reminder child inference. The official
+    // SDK's real-host tests use this empty roster for a single agent loop.
+    args.push("-c", 'run.reminder_roster={"agents":[]}')
     if (this.options.baseURL) args.push("-c", `endpoint_transport.base_url=${JSON.stringify(this.options.baseURL)}`)
     const handshake = spawnMspConnection({
       command: this.options.command, args,
@@ -104,7 +100,22 @@ export class MuseSdkRuntime {
     return this.deadline(this.host.connection.command(method, params, { maxAttempts: 1, ...options }), method)
   }
 
-  async start({ model, effort, prompt, images, mcpServers, onSession, onText, onComplete, onError, onActivity }) {
+  async createSession(host, model) {
+    const catalog = await this.deadline(host.connection.request("model/list", {}), "model/list")
+    const selected = catalog.models?.find((row) => row.modelId === model && row.providerId === "meta")
+    if (!selected) throw runtimeError(`Meta model ${model} is not in this host's model catalog`)
+    const result = await this.command("session/start", {
+      workspaceRoot: this.options.cwd,
+      // Empty preset exposes only the host's bridge MCP tools. Their execution
+      // and permission checks remain with the requesting Magpie client.
+      approvalMode: "allowAll",
+      providerId: selected.providerId, modelId: selected.modelId,
+    })
+    this.sessionId = result.session?.sessionId
+    if (!this.sessionId) throw runtimeError("session/start returned no sessionId")
+  }
+
+  async start({ model, effort, prompt, images, replayInput, onSession, onText, onComplete, onError, onActivity }) {
     if (this.active) throw runtimeError("conversation already has an active turn")
     const active = { onText, onComplete, onError, onActivity, items: new Map(), usage: [], cursors: new Set() }
     this.active = active
@@ -112,25 +123,26 @@ export class MuseSdkRuntime {
       const host = await this.ensureHost()
       if (this.active !== active || this.closed) return
       if (!this.sessionId) {
-        const catalog = await this.deadline(host.connection.request("model/list", {}), "model/list")
-        const selected = catalog.models?.find((row) => row.modelId === model && row.providerId === "meta")
-        if (!selected) throw runtimeError(`Meta model ${model} is not in this host's model catalog`)
-        const result = await this.command("session/start", {
-          workspaceRoot: this.options.cwd,
-          // Empty preset exposes only the bridge MCP tools. Their actual execution
-          // and permission checks remain with the requesting Magpie client.
-          approvalMode: "allowAll",
-          providerId: selected.providerId, modelId: selected.modelId,
-          config: { mcpServers },
-        })
-        this.sessionId = result.session?.sessionId
-        if (!this.sessionId) throw runtimeError("session/start returned no sessionId")
+        await this.createSession(host, model)
       } else if (this.loadedHost !== host) {
-        const result = await this.command("session/resume", {
-          sessionId: this.sessionId, excludeItems: true, config: { mcpServers },
-        })
-        if (result.session?.sessionId !== this.sessionId) throw runtimeError("session/resume returned a different session")
-        if (result.pendingRequests?.length) throw runtimeError("resumed session has unfinished requests; replay caller history in a new session")
+        try {
+          const result = await this.command("session/resume", {
+            sessionId: this.sessionId, excludeItems: true,
+          })
+          if (result.session?.sessionId !== this.sessionId) throw runtimeError("session/resume returned a different session")
+          if (result.pendingRequests?.length) throw runtimeError("resumed session has unfinished requests; inspect it before retrying")
+        } catch (error) {
+          // Only a typed, definite absence is safe to replace without another
+          // caller round trip. Never replay sessionInUse, pending approvals, a
+          // transport timeout, or an ambiguously admitted turn.
+          if (!["sessionNotFound", "notFound"].includes(error.kind)) throw error
+          if (this.active !== active || this.closed) return
+          this.sessionId = null
+          const replay = replayInput()
+          prompt = replay.prompt
+          images = replay.images
+          await this.createSession(host, model)
+        }
       }
       this.loadedHost = host
       onSession(this.sessionId)

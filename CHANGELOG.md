@@ -4,10 +4,13 @@
 
 - Default to official `@muse-code/sdk` 1.4.14 with a persistent
   `muse serve --preset empty` host per conversation.
-- Inject client tools through per-session MCP configuration. Keep live MCP calls
+- Configure client tools in each conversation's private host settings, including
+  native MCP timeouts above the client's wait budget. Keep live MCP calls
   pending across HTTP `tool_use` / `tool_result` round trips.
 - Reuse native sessions between turns and resume durable sessions after an idle
   host exits. Rebuild context when caller history or tool schemas change.
+- Recover definitively missing sessions in the same HTTP request by replaying
+  caller history. Never replay a session that another host owns.
 - Withhold native user questions and disable bundled reminder observers. Real
   host tests check that only client MCP tools reach the model.
 - Forward text, native image parts and counted-once token usage; surface
