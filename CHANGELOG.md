@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2
+
+- Add the Meta icon to Magpie discovery cards, installed-plugin rows and the
+  provider through embedded package metadata.
+- Add the GitHub `magpie-plugin` discovery topic and repository metadata.
+- Use the Macmini with its real Muse browser sign-in for manual verification;
+  document running tests in the logged-in GUI session for Keychain access.
+- Verify real Wonder text responses, follow-up history and MCP tool round trips
+  on the Macmini using the existing browser sign-in with no environment API key.
+- Return model-access refusals as `not_found_error` rather than transient 502
+  errors, preserve the sign-in, and add an opt-in real-account smoke test.
+
 ## 0.2.1
 
 - Offer existing Muse login inside the main UI sign-in flow as well as the

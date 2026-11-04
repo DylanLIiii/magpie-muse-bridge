@@ -1,5 +1,7 @@
 # magpie-muse-bridge
 
+<img src="./assets/meta.svg" alt="Meta" width="48" height="48">
+
 A [magpie](https://github.com/yetone/magpie) provider plugin built on the
 **official Muse Code SDK** and the real `muse serve` host.
 
@@ -8,11 +10,13 @@ The empty preset removes built-in tools; the client's tools are supplied as a
 MCP server in that conversation's private host settings. Muse handles upstream authentication and model calls.
 An explicit `exec` mode retains the original per-turn CLI implementation.
 
-The SDK uses the CLI's configured credential. Successful end-to-end runs have
-been tested with a local fake Meta upstream. A real subscription-account check
-on November 4, 2026 failed in both the official CLI and the bridge: Meta returned
-an empty model catalog and rejected explicit model requests. A successful real
-subscription model/tool round trip is **still unverified**. Meta's subscription
+The SDK uses the CLI's configured credential. On November 4, 2026, the bridge
+passed real-account tests on the **Macmini** with Muse 1.4.14 and
+`muse-wonder-1.0`: text generation with usage, a follow-up recalling history,
+and an MCP `tool_use → tool_result → end_turn` round trip. The existing Muse
+browser sign-in was used with `META_API_KEY` unset. See the
+[Macmini verification record](docs/diagnostics/2026-11-04-macmini.md).
+Meta's subscription
 documentation limits subscription credentials to Muse Code; SDK login reuse
 alone does not establish subscription eligibility for third-party gateway use.
 An API key in `META_API_KEY` takes precedence over browser login and may be billed
@@ -190,9 +194,11 @@ also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
   wait budget. Host settings are used because the public MSP per-session MCP
   schema has no timeout field; each host serves only its owning conversation.
 - **One account**, whichever one `muse login` signed in.
-- **macOS Keychain:** muse may keep part of its credential in the Keychain.
-  This wasn't verified with a real login. If the isolated config breaks
-  sign-in, `magpie plugin login muse-bridge` fails with muse's own message.
+- **macOS Keychain:** Muse may keep part of its credential in the Keychain.
+  Reusing the real login with isolated bridge settings passed on the Macmini
+  in the logged-in GUI user session. SSH can lack Keychain access even while
+  that login works in the GUI; run manual tests in the GUI user session in
+  that case. Login failures retain Muse's own diagnostic message.
 
 ## Configuration
 
@@ -210,6 +216,14 @@ also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
 | `MUSE_BRIDGE_LOGIN_TIMEOUT_MS` | 540000 | total device-login deadline, including an abandoned callback; may only shorten this budget |
 
 ## Development
+
+Manual verification runs on the **Macmini**, using its existing real Muse
+browser sign-in. That is the acceptance environment for subsequent changes;
+the earlier `large-vps` results remain historical diagnostics. The Macmini's
+logged-in macOS user session must have access to Muse's Keychain credential.
+An SSH Keychain-access error is not evidence that the account is signed out.
+Use an isolated checkout and preserve the existing Muse/Magpie configuration.
+GitHub Actions also runs the deterministic suites automatically.
 
 ```sh
 npm run check
@@ -231,6 +245,10 @@ request is bounded to 60 seconds. It stops at the first failure, checks SSE
 errors even when HTTP is 200, and never counts a login/usage check as successful
 inference. It runs the local plugin so it can dispose the conversation and any
 pending MCP calls on failure, and prints the selected `sdk` or `exec` transport.
+
+The GitHub repository carries the `magpie-plugin` topic for Magpie's plugin
+discovery. The embedded Meta SVG in `package.json` → `magpie.icon` supplies the
+discovery, installed-plugin, and provider icon without an external image fetch.
 
 If the live test reports `model ... does not exist or you lack access`, run the
 same model directly on the same host:
@@ -255,7 +273,9 @@ mismatch; the account's actual subscription status cannot be inferred from the
 empty catalog alone. A subsequent fresh browser sign-in succeeded in the native
 CLI logs, but the model catalog remained empty and direct Wonder requests still
 failed with Contributor mode both off and on. Reauthentication did not restore
-model access in this check; the underlying cause remains unresolved.
+model access on that VPS. A later Macmini check passed text, follow-up and MCP
+round trips using its own existing browser sign-in. Subsequent acceptance tests
+use the Macmini; the VPS account/environment issue remains a historical finding.
 
 `test-sdk.mjs` always tests streaming, usage, conversation reuse, divergent-history
 replay, tool results/duplicate conflicts, changed tool schemas and images. Its
@@ -303,9 +323,9 @@ The plugin was also installed in an isolated **magpie 0.1.1734** host (separate
 XDG dirs and gateway port). `plugin add` and keyless `plugin login` passed.
 Requests to the gateway's `/v1/messages` completed a plain-text turn and a
 `tool_use → tool_result → end_turn` round trip, using the real muse against the
-fake upstream. The real-backend smoke test described above currently fails at
-model access, so successful inference and tool execution against Meta remain
-unverified.
+fake upstream. Real Meta inference and MCP tool execution subsequently passed
+through the plugin on the Macmini, as recorded above; that run used the plugin
+directly and did not test Magpie's gateway HTTP translation.
 
 ## License
 
