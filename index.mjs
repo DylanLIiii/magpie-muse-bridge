@@ -1221,7 +1221,8 @@ function makeAnthropicStream(conv, turn, body, msgId, signal) {
         if (finished) return
         try {
           closeTextBlock()
-          send("error", { type: "error", error: { type: "api_error", message: String(error?.message ?? error) } })
+          const { status, message } = classifyError(error)
+          send("error", { type: "error", error: { type: errorType(status), message } })
           turn.finalize()
           detach()
           controller.close()
@@ -1324,14 +1325,24 @@ function makeAnthropicStream(conv, turn, body, msgId, signal) {
 
 const AUTH_FAILURE = /not logged in|run `?muse login`?|log in again|sign in again|was rejected|unauthori[sz]ed|no login to refresh/i
 const QUOTA_FAILURE = /quota|rate limit|usage limit|allowance|too many requests/i
+// MSP 1.4.14's modelError has no upstream HTTP status. Match only Muse's
+// specific catalog/access diagnostics; an unknown model failure remains 502.
+const MODEL_ACCESS_FAILURE = /model [`"'][^`"'\r\n]+[`"'] does not exist or you lack access|Meta model [^\r\n]+ is not in this host's model catalog|model catalog has no visible models/i
+
+function classifyError(error) {
+  let message = String(error?.message ?? error)
+  let status = error?.statusCode
+  if ((!status || status === 404) && MODEL_ACCESS_FAILURE.test(message)) {
+    status = 404
+    message += "\nVerify model access with `muse exec` on this host. A successful `muse usage` check confirms sign-in, not model availability. If the official CLI also fails, refresh the Muse login and check Meta account/model access before retrying the bridge."
+  }
+  status ||= AUTH_FAILURE.test(message) ? 401 : QUOTA_FAILURE.test(message) ? 429 : 502
+  return { status, message }
+}
 
 function errorResponse(error) {
-  const message = String(error?.message ?? error)
-  if (error?.statusCode === 401) return jsonError(401, message, { "X-Magpie-Sign-In": "expired" })
-  if (error?.statusCode) return jsonError(error.statusCode, message)
-  if (AUTH_FAILURE.test(message)) return jsonError(401, message, { "X-Magpie-Sign-In": "expired" })
-  if (QUOTA_FAILURE.test(message)) return jsonError(429, message)
-  return jsonError(502, message)
+  const { status, message } = classifyError(error)
+  return jsonError(status, message, status === 401 ? { "X-Magpie-Sign-In": "expired" } : {})
 }
 
 // Hold the HTTP answer until muse says something (or a short wait passes),
@@ -1536,12 +1547,17 @@ export const MuseBridgePlugin = async () => {
   }
 }
 
+function errorType(status) {
+  return status === 400 ? "invalid_request_error" : status === 401 ? "authentication_error" :
+    status === 404 ? "not_found_error" : status === 429 ? "rate_limit_error" : "api_error"
+}
+
 function jsonError(status, message, headers = {}) {
   return new Response(
     JSON.stringify({
       type: "error",
       error: {
-        type: status === 400 ? "invalid_request_error" : status === 401 ? "authentication_error" : status === 429 ? "rate_limit_error" : "api_error",
+        type: errorType(status),
         message: String(message || "unknown error"),
       },
     }),

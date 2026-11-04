@@ -143,6 +143,14 @@ try {
     assert.equal(r.headers.get("x-magpie-sign-in"), "expired")
   })
 
+  await step("model access refusal maps to HTTP 404 without expiring the login", async () => {
+    const r = await call({ messages: [{ role: "user", content: "please FAIL404 now" }] })
+    assert.equal(r.status, 404, JSON.stringify(r))
+    assert.equal(r.error.error.type, "not_found_error")
+    assert.match(r.error.error.message, /request_id=fixture-model-access/)
+    assert.equal(r.headers.get("x-magpie-sign-in"), null)
+  })
+
   await step("auth.json rewrite is carried back to the user's file", async () => {
     const real = path.join(tmp, "user-config", "muse", "auth.json")
     fs.writeFileSync(real, JSON.stringify({ providers: { meta: { mechanism: "oauth", access_token: "old" } } }))

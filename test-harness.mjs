@@ -156,6 +156,11 @@ function startUpstream(requests) {
         jsonBody(401, { error: { message: "invalid token", type: "authentication_error" } })
         return
       }
+      if (last?.type !== "function_call_output" && current.includes("FAIL404")) {
+        record.status = 404
+        jsonBody(404, { error: { message: 'model `muse-spark-1.3` does not exist or you lack access [request_id=fixture-model-access]', type: "not_found_error" } }, { "x-request-id": "fixture-model-access" })
+        return
+      }
       if (current.includes("SLOW_START")) await sleep(3000)
       if (record.closed) return
       res.writeHead(200, { "content-type": "text/event-stream" })

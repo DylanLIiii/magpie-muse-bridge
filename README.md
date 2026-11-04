@@ -8,8 +8,11 @@ The empty preset removes built-in tools; the client's tools are supplied as a
 MCP server in that conversation's private host settings. Muse handles upstream authentication and model calls.
 An explicit `exec` mode retains the original per-turn CLI implementation.
 
-The SDK uses the CLI's configured credential. This has been tested with a local
-fake Meta upstream, **not a real subscription account**. Meta's subscription
+The SDK uses the CLI's configured credential. Successful end-to-end runs have
+been tested with a local fake Meta upstream. A real subscription-account check
+on November 4, 2026 failed in both the official CLI and the bridge: Meta returned
+an empty model catalog and rejected explicit model requests. A successful real
+subscription model/tool round trip is **still unverified**. Meta's subscription
 documentation limits subscription credentials to Muse Code; SDK login reuse
 alone does not establish subscription eligibility for third-party gateway use.
 An API key in `META_API_KEY` takes precedence over browser login and may be billed
@@ -151,7 +154,10 @@ also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
 - **Errors you can act on.** The HTTP response waits for muse's first event
   (up to 15 s). A failure before any output, such as a lapsed sign-in, returns
   401 with `X-Magpie-Sign-In: expired`, or 429 for quota, instead of an error
-  inside a 200 stream.
+   inside a 200 stream. A model-access refusal or an empty model catalog returns
+   404 (`not_found_error`) if detected before the stream starts. A later refusal
+   retains HTTP 200 and emits an SSE `not_found_error`. Both preserve the sign-in
+   and tell you to verify model access in the official CLI.
 - **Usage.** MSP `session/tokenUsage` supplies counted-once prompt tokens per
   completion, aggregated for the turn without adding `turn/completed.usage` twice.
   The final HTTP `message_delta` uses Anthropic's convention (`input_tokens`
@@ -215,7 +221,41 @@ MUSE_TEST_SLOW=1 MUSE_TEST_BIN=/path/to/muse node test-sdk.mjs # also hold an MC
 MUSE_TEST_BIN=/path/to/muse npm run test:exec # original exec regression suite
 MUSE_TEST_SLOW=1 MUSE_TEST_BIN=… node test-real-muse.mjs   # adds a 75 s tool wait
 MUSE_TEST_MAGPIE=1 MUSE_TEST_BIN=… node test-magpie-backend.mjs   # real model via a local magpie; spends tokens
+MUSE_TEST_LIVE=1 npm run test:live       # real Meta account: text, follow-up, MCP; spends quota
 ```
+
+`test:live` requires a saved Muse browser sign-in and rejects `META_API_KEY`, so
+an environment API key cannot mask the subscription login. It
+defaults to `muse-wonder-1.0`; select another model with `MUSE_TEST_MODEL`. Each
+request is bounded to 60 seconds. It stops at the first failure, checks SSE
+errors even when HTTP is 200, and never counts a login/usage check as successful
+inference. It runs the local plugin so it can dispose the conversation and any
+pending MCP calls on failure, and prints the selected `sdk` or `exec` transport.
+
+If the live test reports `model ... does not exist or you lack access`, run the
+same model directly on the same host:
+
+```sh
+muse exec --preset empty --model muse-wonder-1.0 --contributor-mode off "Reply OK"
+```
+
+If that also fails, model access is blocked upstream of the bridge. `muse usage
+--json` can succeed with `server_sent_no_usage` even when Meta's model catalog is
+empty; that result confirms neither model availability nor successful inference.
+Refresh the official Muse login with `muse login` and check that it is the same
+Meta account whose model/subscription access you verified. Preserve the upstream
+`request_id` if reporting the issue to Meta. Repeated retries or changing bridge
+transports do not establish model access.
+
+In the November 4 check, the CLI logged a successful credential refresh. In an
+isolated copy of the login with its cached API key removed, `muse usage --json`
+reacquired the same key; Meta still returned an empty catalog and a direct model
+request still failed. This rules out neither stale OAuth state nor an account
+mismatch; the account's actual subscription status cannot be inferred from the
+empty catalog alone. A subsequent fresh browser sign-in succeeded in the native
+CLI logs, but the model catalog remained empty and direct Wonder requests still
+failed with Contributor mode both off and on. Reauthentication did not restore
+model access in this check; the underlying cause remains unresolved.
 
 `test-sdk.mjs` always tests streaming, usage, conversation reuse, divergent-history
 replay, tool results/duplicate conflicts, changed tool schemas and images. Its
@@ -263,7 +303,9 @@ The plugin was also installed in an isolated **magpie 0.1.1734** host (separate
 XDG dirs and gateway port). `plugin add` and keyless `plugin login` passed.
 Requests to the gateway's `/v1/messages` completed a plain-text turn and a
 `tool_use → tool_result → end_turn` round trip, using the real muse against the
-fake upstream. None of this has been verified against Meta's real backend.
+fake upstream. The real-backend smoke test described above currently fails at
+model access, so successful inference and tool execution against Meta remain
+unverified.
 
 ## License
 

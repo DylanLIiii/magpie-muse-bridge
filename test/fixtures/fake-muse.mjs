@@ -103,6 +103,7 @@ async function run(s, turn, prompt) {
   if (current.includes('SDK_STALL')) return
   if (current.includes('SDK_AUTH')) { complete(s, turn, 'failed', { kind: 'authRequired', message: 'Authentication required (fixture)', retryable: false, requestDenied: true }); return }
   if (current.includes('SDK_QUOTA')) { complete(s, turn, 'failed', { kind: 'modelError', message: 'Quota exhausted (fixture)', retryable: false, quota: { limitKind: 'tierLimit', resetsAtMs: 1893456000000 } }); return }
+  if (current.includes('FAIL404')) { complete(s, turn, 'failed', { kind: 'modelError', message: 'model `muse-spark-1.3` does not exist or you lack access [request_id=fixture-model-access]', retryable: false, requestDenied: true }); return }
   let text
   if (/CALL_ONE|CALL_TWO/.test(current)) {
     let target
@@ -120,6 +121,9 @@ async function run(s, turn, prompt) {
   const item = { itemId: mint(), kind: 'agentMessage', turnId: turn.id, status: 'inProgress', revision: 1, text: '' }
   event(s, 'item/started', { item })
   event(s, 'item/delta', { itemId: item.itemId, field: 'text', delta: text }, false)
+  if (current.includes('SDK_PARTIAL_MODEL_ACCESS')) {
+    complete(s, turn, 'failed', { kind: 'modelError', message: 'model `muse-spark-1.3` does not exist or you lack access [request_id=fixture-stream-access]', retryable: false }); return
+  }
   if (current.includes('SDK_PARTIAL_CRASH')) {
     setTimeout(() => void shutdown(17), 50)
     return

@@ -142,6 +142,30 @@ try {
     }] }] }); successful(r)
     if (real) assert.ok(h.requests.some((r) => JSON.stringify(r.body.input).includes("input_image")))
   })
+  await step("model access refusal returns non-retryable HTTP 404 and preserves sign-in", async () => {
+    const r = await call({ messages: [user("upstream FAIL404")] })
+    assert.equal(r.status, 404, JSON.stringify(r))
+    assert.equal(r.error.error.type, "not_found_error")
+    assert.match(r.error.error.message, /request_id=fixture-model-access/)
+    assert.match(r.error.error.message, /muse usage.*sign-in, not model availability/)
+    assert.equal(r.headers.get("X-Magpie-Sign-In"), null)
+    assert.equal(_test.liveTurns.size, 0)
+    successful(await call({ messages: [user("after model access refusal")] }))
+  })
+  await step("a model absent from the host catalog fails before turn submission", async () => {
+    // A real host may synthesize a row for its --model startup override. Test
+    // a switch on an existing host, where the requested model is truly absent.
+    const messages = [user("missing catalog model")]
+    const first = await call({ messages }); successful(first)
+    const before = readLogs().filter(row => row.type === "rpc" && row.method === "turn/start").length
+    const upstreamBefore = h.requests.length
+    const r = await call({ model: "missing-model", messages: [...messages, assistant(first.content), user("switch to missing model")] })
+    assert.equal(r.status, 404, JSON.stringify(r))
+    assert.equal(r.error.error.type, "not_found_error")
+    assert.equal(r.headers.get("X-Magpie-Sign-In"), null)
+    assert.equal(readLogs().filter(row => row.type === "rpc" && row.method === "turn/start").length, before)
+    assert.equal(h.requests.length, upstreamBefore)
+  })
   if (real) {
     if (process.env.MUSE_TEST_SLOW === "1") {
       await step("real SDK tool call remains pending across a 75-second client operation", async () => {
@@ -184,6 +208,14 @@ try {
       successful(await call({ messages: [user("after real auth failure")] }))
     })
   } else {
+    await step("model access failure after text keeps its type inside the SSE error", async () => {
+      const r = await call({ messages: [user("SDK_PARTIAL_MODEL_ACCESS")] })
+      assert.equal(r.status, 200)
+      assert.equal(r.error.type, "not_found_error")
+      assert.match(r.error.message, /request_id=fixture-stream-access/)
+      assert.equal(r.stop, null)
+      assert.equal(_test.liveTurns.size, 0)
+    })
     await step("an accepted queued turn waits for its own events without resubmitting", async () => {
       const r = await call({ messages: [user("SDK_QUEUE")] })
       successful(r); assert.equal(r.content[0].text, "REPLY users=1 history=no")
