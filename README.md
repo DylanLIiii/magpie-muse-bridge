@@ -139,8 +139,9 @@ also get an explicit explanation. Refreshing uses Magpie's normal quota cache.
   `stop_reason: tool_use`. The next request's `tool_result` answers that exact
   call and the same muse run continues. Tools called together in one model
   step are handed over in one response. Tool errors, images in tool results, and
-  context notices (`<system-update>`, task notifications) work the same way
-  they do in the antigravity bridge.
+  context notices (`<system-update>`, task notifications, omp `<advisory>`
+  blocks) work the same way they do in the antigravity bridge. Text that is not
+  such a notice, including mid-turn user messages, is still rejected with 400.
 - **Isolation.** Each conversation gets its own `XDG_CONFIG_HOME`,
   `XDG_DATA_HOME`, and `XDG_STATE_HOME`. Its private `settings.json` declares
   only the bridge MCP server, so your own MCP servers stay out, and magpie's rewrite of
@@ -301,12 +302,14 @@ machine. They were originally tested with Muse 1.4.13.
   - muse exiting at start, killed mid-stream, and killed while the client
     runs a tool
   - 429 retried, and persistent 429 mapped to HTTP 429
-- `test-edges.mjs` (10) covers:
+- `test-edges.mjs` (12) covers:
   - turn and tool-result timeouts
   - `MAX_ACTIVE` 503
   - images, current turn via `--image` and older ones as markers
-  - tool results: `is_error`, `<system-update>` after a tool_result, renamed
-    `tool_use_id` fallback, and duplicate / stale tool results (409)
+  - tool results: `is_error`, `<system-update>` after a tool_result, `<advisory>`
+    blocks with the advisor preamble (mid-turn user message text is still
+    refused), renamed `tool_use_id` fallback, and duplicate / stale tool
+    results (409)
   - idle eviction with history replay, and 401 fast-fail
 
 Every failure case checks three things: muse and its MCP helper have exited,

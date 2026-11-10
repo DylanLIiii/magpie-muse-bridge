@@ -1010,11 +1010,16 @@ function extractToolResults(body) {
 
 // Forward complete protocol-generated context notices without turning ordinary
 // user instructions into tool output. OpenCode can append a <system-update>
-// after a tool result when its dynamic tool catalog changes.
+// after a tool result when its dynamic tool catalog changes, and omp appends
+// <advisory> blocks from its advisor.
 function withContextNotices(results, body) {
   const notices = []
   let seenResult = false
-  const contextNotice = /<system-update(?:\s[^>]*)?>[\s\S]*?<\/system-update>|(?:\[SYSTEM NOTIFICATION - NOT USER INPUT\][^<]*)?<task-notification>[\s\S]*?<\/task-notification>/g
+  // The advisor in omp prepends a fixed one-line preamble to its first
+  // <advisory> block; consume it together with the block. A user message such
+  // as "The user sent a new message while you were working:" is not matched,
+  // so it is still rejected below.
+  const contextNotice = /<system-update(?:\s[^>]*)?>[\s\S]*?<\/system-update>|(?:The following is an aggregated review from other models\.[^<]*)?<advisory(?:\s[^>]*)?>[\s\S]*?<\/advisory>|(?:\[SYSTEM NOTIFICATION - NOT USER INPUT\][^<]*)?<task-notification>[\s\S]*?<\/task-notification>/g
   for (const message of trailingMessages(body).messages) {
     const blocks = Array.isArray(message.content) ? message.content : [message.content]
     for (const block of blocks) {
