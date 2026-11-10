@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Forward complete `<advisory>` blocks, with the fixed advisor preamble omp puts
+  before the first one, beside a live `tool_result` as a `<system-reminder>`
+  instead of rejecting the request with 400. Other text beside a live
+  `tool_result`, including mid-turn user messages, is still rejected.
+
 ## 0.2.2
 
 - Add the Meta icon to Magpie discovery cards, installed-plugin rows and the
